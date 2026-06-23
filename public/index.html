@@ -547,8 +547,22 @@ async function init() {
   if (cfg.showSplash) {
     splashVisible = true;
     document.getElementById('splash').style.display = 'flex';
+    // Hold off loading until the splash entrance animation has finished (button
+    // clickable, glow settled) so the intro renders perfectly smoothly first.
+    startBootAfterSplash();
+  } else {
+    boot();
   }
-  boot();
+}
+
+// Start loading once the splash's entrance animation completes (with a timeout
+// fallback in case animationend never fires, e.g. reduced-motion settings).
+function startBootAfterSplash() {
+  let started = false;
+  const start = () => { if (started) return; started = true; boot(); };
+  const wrapper = document.querySelector('#splash .stamp-wrapper');
+  if (wrapper) wrapper.addEventListener('animationend', start, { once: true });
+  setTimeout(start, 1200);
 }
 
 let booted = false;
