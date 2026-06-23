@@ -101,6 +101,25 @@
     }
     #splash .enter-btn:hover { background: var(--splash-main); color: #000; box-shadow: 0 0 30px var(--splash-glow); }
     #splash .classified-id { margin-top: 16px; font-size: 0.65rem; color: var(--splash-faint); letter-spacing: 0.15em; }
+    #splash .splash-progress {
+      margin-top: 12px; font-family: 'Courier New', Courier, monospace;
+      font-size: 0.7rem; letter-spacing: 0.12em;
+      display: flex; align-items: center; gap: 10px; justify-content: center;
+    }
+    #splash .splash-progress .sp-label { color: var(--splash-fainter); }
+    #splash .splash-progress .sp-bar { letter-spacing: 2px; }
+    #splash .splash-progress .sp-fill { color: var(--splash-main); }
+    #splash .splash-progress .sp-empty { color: var(--splash-fainter); opacity: 0.4; }
+    #splash .splash-progress .sp-caret { color: var(--splash-main); animation: blink 0.5s step-end infinite alternate; }
+    #splash .splash-progress .sp-pct { color: var(--splash-main); min-width: 34px; text-align: right; }
+
+    /* ── BOTTOM LOADING BAR ── */
+    .app-progress {
+      position: fixed; left: 0; right: 0; bottom: 0; height: 3px; z-index: 4000;
+      background: rgba(255,255,255,0.06); opacity: 0; transition: opacity 0.25s; pointer-events: none;
+    }
+    .app-progress.active { opacity: 1; }
+    .app-progress-fill { height: 100%; width: 0; background: var(--accent); box-shadow: 0 0 10px var(--accent); transition: width 0.2s ease; }
 
     /* ── HEADER ── */
     header {
@@ -349,6 +368,11 @@
 
   <button class="enter-btn" onclick="dismissSplash()">[ GRANT ACCESS ]</button>
   <div class="classified-id">AUTHORIZATION CODE: ████████ &nbsp;|&nbsp; DOCUMENT: PSW-TERR-001 &nbsp;|&nbsp; HANDLE VIA BIGOT LIST ONLY</div>
+  <div class="splash-progress">
+    <span class="sp-label">DECRYPTING MAP DATA</span>
+    <span class="sp-bar" id="splash-progress-bar"></span>
+    <span class="sp-pct" id="splash-progress-pct">0%</span>
+  </div>
 
   <!-- BOTTOM BAR — fixed red, text scrolls inside in reverse -->
   <div class="warning-tape-bar bottom">
@@ -462,6 +486,9 @@
   </div>
 </div>
 
+<!-- Bottom loading bar (shown whenever map data is loading after entry) -->
+<div id="app-progress" class="app-progress"><div id="app-progress-fill" class="app-progress-fill"></div></div>
+
 <script>
 // ══════════════════════════════════
 // STATE
@@ -518,31 +545,81 @@ async function init() {
   }
 
   if (cfg.showSplash) {
-    // Keep the splash animation smooth: defer the heavy map + coverage build
-    // (Leaflet init, isochrone fetches, turf union/buffer) until the user
-    // enters, so it doesn't contend with the splash on the main thread.
+    splashVisible = true;
     document.getElementById('splash').style.display = 'flex';
-  } else {
-    await boot();
   }
+  boot();
 }
 
 let booted = false;
+let splashVisible = false;
+
+// Loads the data and PRE-FETCHES all coverage polygons (showing progress on
+// the splash bar), but holds off the heavy union/draw while the splash is up
+// so its animation stays smooth. The draw happens on dismiss, using the cache.
 async function boot() {
   if (booted) return;
   booted = true;
   initMap();
   loadProjectPins();
   loadExcluded();
-  await loadAll();
+  progressSet(0);
+  await loadData();
+  await prefetchCoverage();
+  if (!splashVisible) renderCoverage();
 }
 
 function dismissSplash() {
+  splashVisible = false;
   const splash = document.getElementById('splash');
   splash.style.transition = 'opacity 0.5s';
   splash.style.opacity = '0';
   setTimeout(() => splash.style.display = 'none', 500);
-  boot(); // build the app now (no-op if already booted)
+  boot();          // safety: start if it somehow hasn't
+  renderCoverage(); // draw now (polygons are already prefetched → fast)
+}
+
+// ══════════════════════════════════
+// LOADING PROGRESS (splash block-bar + bottom bar)
+// ══════════════════════════════════
+function progressShow() { document.getElementById('app-progress')?.classList.add('active'); }
+function progressHide() { document.getElementById('app-progress')?.classList.remove('active'); }
+function progressDone() { progressSet(100); setTimeout(progressHide, 500); }
+
+function progressSet(pct) {
+  pct = Math.max(0, Math.min(100, Math.round(pct)));
+  const fill = document.getElementById('app-progress-fill');
+  if (fill) fill.style.width = pct + '%';
+  const bar = document.getElementById('splash-progress-bar');
+  if (bar) {
+    const cells = 16;
+    const filled = Math.floor(pct / 100 * cells);
+    const showCaret = filled < cells;
+    const empty = Math.max(0, cells - filled - (showCaret ? 1 : 0));
+    bar.innerHTML = `<span class="sp-fill">${'█'.repeat(filled)}</span>` +
+      (showCaret ? '<span class="sp-caret">█</span>' : '') +
+      `<span class="sp-empty">${'█'.repeat(empty)}</span>`;
+  }
+  const pe = document.getElementById('splash-progress-pct');
+  if (pe) pe.textContent = pct + '%';
+}
+
+// Runs an async worker over items, advancing the progress bar as each resolves
+async function runWithProgress(items, worker) {
+  const total = items.length;
+  if (!total) { progressSet(100); setTimeout(progressHide, 300); return []; }
+  progressShow();
+  progressSet(0);
+  let done = 0;
+  const out = await Promise.all(items.map(async it => {
+    let r = null;
+    try { r = await worker(it); } catch (e) { /* keep going */ }
+    done++;
+    progressSet(done / total * 100);
+    return r;
+  }));
+  progressDone();
+  return out;
 }
 
 // ══════════════════════════════════
@@ -578,7 +655,8 @@ function refreshMap() {
 // ══════════════════════════════════
 // DATA LOAD
 // ══════════════════════════════════
-async function loadAll() {
+// Fetch data + light renders (no coverage draw)
+async function loadData() {
   [locationTypes, locations] = await Promise.all([
     fetch('/api/location-types').then(r => r.json()),
     fetch('/api/locations').then(r => r.json())
@@ -588,8 +666,27 @@ async function loadAll() {
   renderPins();
   renderProjectPins();
   renderProjectPinList();
-  renderCoverage();
   if (selectedTypeId) renderLocationsList();
+}
+
+// Full reload used after any data change
+async function loadAll() {
+  await loadData();
+  await renderCoverage();
+}
+
+// Locations that should contribute coverage right now (visible, not excluded)
+function coverageCandidates() {
+  const visibleTypeIds = getVisibleTypeIds();
+  return locations.filter(l => {
+    const type = locationTypes.find(t => t._id === l.typeId);
+    return type && visibleTypeIds.has(l.typeId) && !excludedLocIds.has(l._id);
+  });
+}
+
+// Warm the polygon cache (with progress) without drawing — used during splash
+async function prefetchCoverage() {
+  await runWithProgress(coverageCandidates(), l => getLocationPolygon(l));
 }
 
 // Shared visibility filter — type IDs whose display toggle is on
@@ -1353,19 +1450,15 @@ async function renderCoverage() {
   const mode = document.querySelector('input[name="cov-mode"]:checked')?.value || 'merged';
   const showCombined = document.getElementById('show-combined')?.checked;
 
-  const visibleTypeIds = getVisibleTypeIds();
-
-  // Build coverage polygons for visible, non-excluded locations
-  const isoPromises = locations.map(async l => {
+  // Build coverage polygons for visible, non-excluded locations, advancing the
+  // progress bar as each isochrone resolves.
+  const built = await runWithProgress(coverageCandidates(), async (l) => {
     const type = locationTypes.find(t => t._id === l.typeId);
-    if (!type || !visibleTypeIds.has(l.typeId)) return null;
-    if (excludedLocIds.has(l._id)) return null;
     const poly = await getLocationPolygon(l);
-    if (!poly) return null;
-    return { loc: l, type, poly };
+    return poly ? { loc: l, type, poly } : null;
   });
 
-  const isoResults = (await Promise.all(isoPromises)).filter(Boolean);
+  const isoResults = built.filter(Boolean);
   // A newer render superseded us while awaiting — discard these stale results
   if (myToken !== coverageToken) return;
   updateApproxNote(isoResults);
