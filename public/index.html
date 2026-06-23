@@ -1267,7 +1267,17 @@ async function confirmMakePermanent() {
 // Convert a circle iso or geojson iso → a turf polygon we can union
 function isoToTurfPolygon(iso) {
   if (iso.type === 'isochrone' && iso.geojson) {
-    return iso.geojson; // already a GeoJSON Feature
+    let poly = iso.geojson; // a GeoJSON Feature
+    // Drive times beyond the ORS cap come back as the capped isochrone plus
+    // the leftover minutes — pad the shape outward by that road distance so
+    // it stays route-aware instead of collapsing to a plain circle.
+    if (iso.extendMinutes > 0) {
+      try {
+        const km = (iso.extendMinutes / 60) * 50; // ~50mph
+        poly = turf.buffer(poly, km, { units: 'kilometers' }) || poly;
+      } catch (e) { /* keep un-buffered shape on failure */ }
+    }
+    return poly;
   } else {
     // Approximate circle as a 64-point turf circle (radius in km)
     return turf.circle([iso.lng, iso.lat], iso.radiusMeters / 1000, { steps: 64 });
