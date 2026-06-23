@@ -1040,22 +1040,33 @@ async function showPinTerritories(pin) {
   }).then(r => r.json()).catch(() => ({ times: [] }));
 
   const rows = matches.map((m, i) => ({ ...m, seconds: tt.times?.[i]?.seconds ?? null, estimated: tt.times?.[i]?.estimated }));
-  rows.sort((a, b) => (a.seconds ?? Infinity) - (b.seconds ?? Infinity));
   const anyEstimated = rows.some(r => r.estimated);
 
-  const list = rows.map(r => `
-    <div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--border)">
-      <span style="width:10px;height:10px;border-radius:50%;background:${r.type.color};flex-shrink:0"></span>
-      <div style="flex:1;min-width:0">
-        <div style="font-weight:600">${escapeHtml(r.loc.name)}</div>
-        <div style="font-size:0.75rem;color:var(--text2)">${escapeHtml(r.type.name)}</div>
+  // Group by location type; sort within each group by drive time, and order
+  // the groups themselves by their nearest member.
+  const groups = {};
+  rows.forEach(r => { (groups[r.type._id] = groups[r.type._id] || { type: r.type, items: [] }).items.push(r); });
+  const groupList = Object.values(groups);
+  groupList.forEach(g => g.items.sort((a, b) => (a.seconds ?? Infinity) - (b.seconds ?? Infinity)));
+  groupList.sort((a, b) => (a.items[0].seconds ?? Infinity) - (b.items[0].seconds ?? Infinity));
+
+  const list = groupList.map(g => `
+    <div style="margin-top:12px">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
+        <span style="width:11px;height:11px;border-radius:50%;background:${g.type.color};flex-shrink:0"></span>
+        <span style="font-weight:700;font-size:0.85rem">${escapeHtml(g.type.name)}</span>
+        <span class="hint">(${g.items.length})</span>
       </div>
-      <div style="font-weight:700;color:var(--accent);white-space:nowrap">${r.estimated ? '~' : ''}${fmtDuration(r.seconds)}</div>
+      ${g.items.map(r => `
+        <div style="display:flex;align-items:center;gap:10px;padding:5px 0 5px 19px;border-bottom:1px solid var(--border)">
+          <div style="flex:1;min-width:0;font-size:0.85rem;font-weight:600">${escapeHtml(r.loc.name)}</div>
+          <div style="font-weight:700;color:var(--accent);white-space:nowrap">${r.estimated ? '~' : ''}${fmtDuration(r.seconds)}</div>
+        </div>`).join('')}
     </div>`).join('');
 
   const note = anyEstimated ? `<div class="hint" style="margin-top:8px">~ straight-line estimate (add an ORS key for real drive times)</div>` : '';
   openModal(`📌 ${escapeHtml(pin.name)}`,
-    `${subtitle}<div class="hint" style="margin-bottom:6px">Covered by ${rows.length} territor${rows.length > 1 ? 'ies' : 'y'} · nearest first</div>${list}${note}${actions}`);
+    `${subtitle}<div class="hint" style="margin-bottom:2px">Covered by ${rows.length} territor${rows.length > 1 ? 'ies' : 'y'} · grouped by type, nearest first</div>${list}${note}${actions}`);
 }
 
 function openModal(title, html) {
