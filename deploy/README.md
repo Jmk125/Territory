@@ -76,6 +76,50 @@ sudo systemctl restart hammond-territory
 | Live logs         | `journalctl -u hammond-territory -f`             |
 | Disable autostart | `sudo systemctl disable hammond-territory`       |
 
+## Self-hosted OpenRouteService (drive-time isochrones)
+
+The app draws real drive-time isochrones by calling an ORS instance. Point it
+at your self-hosted ORS with `ORS_BASE_URL` (include the `/ors` path, no
+trailing slash) and set `ORS_API_KEY` to any non-empty value — self-hosted ORS
+ignores auth. Example `.env`:
+
+```
+ORS_BASE_URL=http://localhost:8082/ors
+ORS_API_KEY=local
+```
+
+The app sends the **full requested drive time** straight to ORS — no cap and no
+circle "approximation". The only range limit that applies is the one your ORS
+instance enforces.
+
+### Isochrones beyond 60 minutes return a circle?
+
+ORS caps isochrone range at **3600s (60 min) by default**, even when
+self-hosted. Requesting more (e.g. a 90-min/5400s isochrone) makes ORS reject
+the request, and the app falls back to a plain circle (the rejection reason is
+logged to the app console / `journalctl`).
+
+Fix it on the ORS side by raising the isochrones endpoint's
+`maximum_range_time` (seconds) and restarting the ORS container:
+
+```yaml
+# ors-config.yml
+ors:
+  endpoints:
+    isochrones:
+      maximum_range_time: 5400    # 90 minutes
+```
+
+Newer ORS versions express this as a per-profile list — match your config
+file's existing format. The equivalent environment-variable override (handy
+with the ORS Docker image) is:
+
+```
+ORS_ENDPOINTS_ISOCHRONES_MAXIMUM_RANGE_TIME=5400
+```
+
+After changing it, restart ORS and confirm the cap in the ORS startup logs.
+
 ## Notes
 
 - The app stores its data (location types, locations, caches) in the `data/`
