@@ -15,7 +15,9 @@ const db = {
   // per unique coordinate+range instead of on every map render.
   isochroneCache: new Datastore({ filename: path.join(__dirname, 'data/isochroneCache.db'), autoload: true }),
   // Cache of driving durations (source→destination) to avoid repeat key calls.
-  travelCache: new Datastore({ filename: path.join(__dirname, 'data/travelCache.db'), autoload: true })
+  travelCache: new Datastore({ filename: path.join(__dirname, 'data/travelCache.db'), autoload: true }),
+  // Runtime ORS settings chosen from the UI (which server to call, range limit).
+  settings: new Datastore({ filename: path.join(__dirname, 'data/settings.db'), autoload: true })
 };
 
 app.use(express.json());
@@ -124,19 +126,107 @@ app.get('/api/geocode', async (req, res) => {
   }
 });
 
+// ─── ORS source settings (chosen from the Configure tab) ───────────
+// The user picks where isochrones/travel times come from at runtime:
+//   • 'api'        → the public ORS API, using the key in .env. The public
+//                    service hard-caps isochrones at 60 min, so longer ranges
+//                    are approximated (the capped shape is padded outward).
+//   • 'selfhosted' → their own ORS instance on the network, with a range limit
+//                    they configure to match its maximum_range_time. Ranges
+//                    above that limit are approximated the same way.
+// Settings persist in data/settings.db so they survive restarts.
+const ORS_PUBLIC_URL = 'https://api.openrouteservice.org';
+const ORS_DEFAULT_MAX_MINUTES = 60;   // public ORS API hard cap
+const ORS_SETTINGS_KEY = 'ors';
+
+// Until the user saves a choice from the UI, fall back to the legacy .env vars
+// (ORS_BASE_URL / ORS_MAX_RANGE_SEC) so existing deployments keep working
+// unchanged. Once they save from the Configure tab, the stored doc wins.
+function envSeedSettings() {
+  const envUrl = normalizeOrsUrl(process.env.ORS_BASE_URL || '');
+  const isSelf = envUrl && !/(^|\.)openrouteservice\.org/i.test(envUrl);
+  const envMaxSec = parseInt(process.env.ORS_MAX_RANGE_SEC, 10);
+  const envMaxMin = envMaxSec > 0 ? Math.round(envMaxSec / 60) : ORS_DEFAULT_MAX_MINUTES;
+  return isSelf
+    ? { mode: 'selfhosted', selfHostedUrl: envUrl, maxRangeMinutes: envMaxMin }
+    : { mode: 'api', selfHostedUrl: '', maxRangeMinutes: ORS_DEFAULT_MAX_MINUTES };
+}
+
+function getOrsSettings() {
+  return new Promise(resolve => db.settings.findOne({ key: ORS_SETTINGS_KEY }, (err, doc) => {
+    if (!doc) return resolve(envSeedSettings());
+    const max = Number(doc.maxRangeMinutes);
+    resolve({
+      mode: doc.mode === 'selfhosted' ? 'selfhosted' : 'api',
+      selfHostedUrl: doc.selfHostedUrl || '',
+      maxRangeMinutes: max > 0 ? max : ORS_DEFAULT_MAX_MINUTES
+    });
+  }));
+}
+
+// fetch with an abort timeout so a slow/unreachable ORS server (e.g. a wrong
+// self-hosted IP) fails fast and falls back to circles/estimates instead of
+// hanging every coverage request.
+async function fetchWithTimeout(url, opts = {}, ms = 15000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), ms);
+  try {
+    return await fetch(url, { ...opts, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Accept either a full URL or a bare host[:port] and return a clean ORS base
+// URL (scheme + /ors context path, no trailing slash), or '' if unparseable.
+function normalizeOrsUrl(input) {
+  if (!input || !String(input).trim()) return '';
+  let s = String(input).trim();
+  if (!/^https?:\/\//i.test(s)) s = 'http://' + s;
+  let u;
+  try { u = new URL(s); } catch (e) { return ''; }
+  if (!u.pathname || u.pathname === '/') u.pathname = '/ors';
+  return u.toString().replace(/\/+$/, '');
+}
+
+// Resolve the active settings into a concrete request target: which base URL to
+// hit, what auth header to send, the effective range cap, and whether ORS is
+// actually usable (else callers fall back to circles/straight-line estimates).
+function resolveOrsTarget(settings) {
+  const envKey = (process.env.ORS_API_KEY || '').trim();
+  if (settings.mode === 'selfhosted' && settings.selfHostedUrl) {
+    return {
+      source: settings.selfHostedUrl,
+      baseUrl: settings.selfHostedUrl,
+      authHeader: envKey || 'local',      // self-hosted ORS ignores auth
+      maxRangeSec: settings.maxRangeMinutes * 60,
+      usable: true
+    };
+  }
+  // Public API mode — hard-capped at 60 min regardless of the stored value.
+  return {
+    source: 'api',
+    baseUrl: ORS_PUBLIC_URL,
+    authHeader: envKey,
+    maxRangeSec: Math.min(settings.maxRangeMinutes, ORS_DEFAULT_MAX_MINUTES) * 60,
+    usable: !!envKey
+  };
+}
+
 // ─── Isochrone proxy (with persistent cache) ───────────────────────
 // A given coordinate + range always produces the same isochrone, so once
 // we've fetched it we store the geometry and serve every later request from
 // the local cache. This means ORS is only hit the first time a new
 // location/range combo appears — not on every coverage re-render.
 //
-// We send the full requested range straight to ORS and draw exactly what it
-// returns — no cap, no outward buffer "approximation". Self-hosting ORS lifts
-// the public API's 60-min limit, so longer drive times are real isochrones.
-// Cache key is versioned (v3) so older buffered/capped entries from the
-// previous approximation scheme are ignored and rebuilt correctly.
-function isoCacheKey(lat, lng, minutes) {
-  return `v3:${Number(lat).toFixed(5)},${Number(lng).toFixed(5)},${minutes}`;
+// We cache the RAW capped isochrone (keyed by source + capped minutes), and the
+// browser pads it outward by any leftover minutes (extendMinutes) with
+// turf.buffer. Caching the capped shape lets several requested ranges that
+// share the same cap reuse one ORS call. Cache key is versioned (v4) and
+// includes the data source so switching servers/limits never serves a stale
+// shape from the previous source.
+function isoCacheKey(source, lat, lng, minutes) {
+  return `v4:${source}:${Number(lat).toFixed(5)},${Number(lng).toFixed(5)},${minutes}`;
 }
 // A geometry is only useful if it actually has coordinates to draw. A null or
 // empty geometry can sneak into the cache when ORS returns a Feature with no
@@ -157,41 +247,87 @@ function isoCacheSet(key, geojson) {
   db.isochroneCache.update({ key }, { key, geojson, createdAt: Date.now() }, { upsert: true });
 }
 
-// Base URL for the ORS API. Defaults to the public endpoint; point this at a
-// self-hosted instance (e.g. http://localhost:8082/ors) to lift the public
-// 60-min isochrone cap and serve everything from your own machine. Note that a
-// self-hosted instance enforces its OWN isochrone limit (ors-config:
-// endpoints.isochrones.maximum_range_time, default 3600s) — raise that there if
-// you want ranges beyond 60 min, otherwise ORS rejects them and we draw a
-// circle (see deploy/README.md and .env.example).
-// Trailing slashes are trimmed so we can append the /v2/... path cleanly.
-const ORS_BASE_URL = (process.env.ORS_BASE_URL || 'https://api.openrouteservice.org').replace(/\/+$/, '');
+// ─── ORS settings endpoints (read/save/test from the Configure tab) ──
+app.get('/api/ors-settings', async (req, res) => {
+  const s = await getOrsSettings();
+  const target = resolveOrsTarget(s);
+  res.json({
+    mode: s.mode,
+    selfHostedUrl: s.selfHostedUrl,
+    maxRangeMinutes: s.maxRangeMinutes,
+    hasApiKey: !!(process.env.ORS_API_KEY && process.env.ORS_API_KEY.trim()),
+    effectiveMaxMinutes: target.maxRangeSec / 60,
+    orsActive: target.usable,
+    defaultApiMaxMinutes: ORS_DEFAULT_MAX_MINUTES
+  });
+});
 
+app.post('/api/ors-settings', (req, res) => {
+  const mode = req.body.mode === 'selfhosted' ? 'selfhosted' : 'api';
+  const selfHostedUrl = mode === 'selfhosted' ? normalizeOrsUrl(req.body.selfHostedUrl) : '';
+  let maxRangeMinutes = parseInt(req.body.maxRangeMinutes, 10);
+  if (!(maxRangeMinutes > 0)) maxRangeMinutes = ORS_DEFAULT_MAX_MINUTES;
+  if (mode === 'api') maxRangeMinutes = ORS_DEFAULT_MAX_MINUTES;   // public API cap
+  maxRangeMinutes = Math.min(maxRangeMinutes, 600);                // sanity ceiling (10h)
+  const doc = { key: ORS_SETTINGS_KEY, mode, selfHostedUrl, maxRangeMinutes, updatedAt: Date.now() };
+  db.settings.update({ key: ORS_SETTINGS_KEY }, doc, { upsert: true }, (err) => {
+    if (err) return res.status(500).json({ error: err.message });
+    res.json({ ok: true, mode, selfHostedUrl, maxRangeMinutes });
+  });
+});
+
+// Probe an ORS server's health endpoint so the UI can confirm a good
+// connection before the user commits to using it.
+app.post('/api/ors-test', async (req, res) => {
+  const baseUrl = normalizeOrsUrl(req.body.url);
+  if (!baseUrl) return res.json({ ok: false, message: 'Enter a valid server address.' });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 6000);
+  try {
+    const r = await fetch(`${baseUrl}/v2/health`, { signal: controller.signal });
+    clearTimeout(timer);
+    const data = await r.json().catch(() => ({}));
+    if (r.ok && (!data.status || data.status === 'ready')) {
+      return res.json({ ok: true, normalizedUrl: baseUrl, message: `Connected to ${baseUrl}` });
+    }
+    return res.json({ ok: false, normalizedUrl: baseUrl, message: `Server reachable but not ready (HTTP ${r.status}${data.status ? `, status: ${data.status}` : ''})` });
+  } catch (e) {
+    clearTimeout(timer);
+    const why = e.name === 'AbortError' ? 'timed out' : e.message;
+    return res.json({ ok: false, normalizedUrl: baseUrl, message: `Could not reach ${baseUrl} (${why})` });
+  }
+});
+
+// ─── Isochrone proxy ───────────────────────────────────────────────
 app.post('/api/isochrone', async (req, res) => {
   const { lat, lng, minutes, force } = req.body;
-  const apiKey = process.env.ORS_API_KEY;
-  const key = isoCacheKey(lat, lng, minutes);
-  const rangeSec = minutes * 60;   // full requested range — no cap, no buffer
+  const settings = await getOrsSettings();
+  const target = resolveOrsTarget(settings);
 
-  // 1. Serve the cached isochrone straight from cache when possible.
+  // Cap the range at the source's limit; the browser pads the leftover minutes.
+  const cappedMin = Math.min(minutes, target.maxRangeSec / 60);
+  const rangeSec = cappedMin * 60;
+  const extendMinutes = Math.max(0, minutes - cappedMin);
+  const rawKey = isoCacheKey(target.source, lat, lng, cappedMin);
+
+  // 1. Serve the capped isochrone straight from cache when possible.
   if (!force) {
-    const cached = await isoCacheGet(key);
+    const cached = await isoCacheGet(rawKey);
     if (cached && hasDrawableGeometry(cached.geojson)) {
-      return res.json({ type: 'isochrone', geojson: cached.geojson, cached: true });
+      return res.json({ type: 'isochrone', geojson: cached.geojson, extendMinutes, cached: true });
     }
   }
 
-  if (!apiKey || !apiKey.trim()) {
+  if (!target.usable) {
     return res.json({ type: 'circle', lat, lng, radiusMeters: minutesToMeters(minutes) });
   }
 
   try {
-    // 2. Ask ORS for the isochrone at the full requested range and draw exactly
-    //    what it returns. If ORS can't honor the range (e.g. it exceeds the
-    //    instance's configured maximum_range), fall back to a circle and log why.
-    const r = await fetch(`${ORS_BASE_URL}/v2/isochrones/driving-car`, {
+    // 2. Fetch the capped isochrone from the active ORS source. If it can't
+    //    honor the range, fall back to a circle and log why.
+    const r = await fetchWithTimeout(`${target.baseUrl}/v2/isochrones/driving-car`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': apiKey },
+      headers: { 'Content-Type': 'application/json', 'Authorization': target.authHeader },
       body: JSON.stringify({ locations: [[lng, lat]], range: [rangeSec], range_type: 'time' })
     });
     const data = await r.json();
@@ -202,8 +338,8 @@ app.post('/api/isochrone', async (req, res) => {
     }
     const feature = data.features[0];
     // Never persist a shape we can't draw — that would poison the cache.
-    if (hasDrawableGeometry(feature)) isoCacheSet(key, feature);
-    res.json({ type: 'isochrone', geojson: feature, cached: false });
+    if (hasDrawableGeometry(feature)) isoCacheSet(rawKey, feature);
+    res.json({ type: 'isochrone', geojson: feature, extendMinutes, cached: false });
   } catch (e) {
     console.warn(`ORS isochrone request failed (range=${rangeSec}s): ${e.message}`);
     res.json({ type: 'circle', lat, lng, radiusMeters: minutesToMeters(minutes), reason: e.message });
@@ -229,7 +365,7 @@ function haversineMeters(a, b) {
 app.post('/api/travel-times', async (req, res) => {
   const { from, to } = req.body;
   if (!Array.isArray(from) || !to) return res.status(400).json({ error: 'from[] and to required' });
-  const apiKey = process.env.ORS_API_KEY;
+  const target = resolveOrsTarget(await getOrsSettings());
 
   const results = new Array(from.length).fill(null);
   const misses = [];
@@ -245,13 +381,13 @@ app.post('/api/travel-times', async (req, res) => {
 
   if (misses.length) {
     const computed = {};
-    if (apiKey && apiKey.trim()) {
+    if (target.usable) {
       try {
         const locations = misses.map(i => [from[i].lng, from[i].lat]);
         locations.push([to.lng, to.lat]);
-        const r = await fetch(`${ORS_BASE_URL}/v2/matrix/driving-car`, {
+        const r = await fetchWithTimeout(`${target.baseUrl}/v2/matrix/driving-car`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Authorization': apiKey },
+          headers: { 'Content-Type': 'application/json', 'Authorization': target.authHeader },
           body: JSON.stringify({ locations, sources: misses.map((_, k) => k), destinations: [misses.length], metrics: ['duration'] })
         });
         const data = await r.json();
