@@ -3,6 +3,7 @@ const express = require('express');
 const Datastore = require('nedb');
 const fetch = require('node-fetch');
 const path = require('path');
+const turf = require('@turf/turf');
 
 const app = express();
 const PORT = process.env.PORT || 3080;
@@ -130,32 +131,42 @@ app.get('/api/geocode', async (req, res) => {
 // we've fetched it we store the geometry and serve every later request from
 // the local cache. This means the ORS key is only hit the first time a new
 // location/range combo appears — not on every coverage re-render.
+//
+// For drive times over the ORS cap we also pre-compute the outward buffer
+// (the "approximation") here and cache the FINISHED shape, so the expensive
+// turf.buffer runs once on the server instead of in every browser on every
+// page load. Cache key is versioned (v2) so older un-buffered entries are
+// ignored after this change and rebuilt correctly.
 function isoCacheKey(lat, lng, minutes) {
-  return `${Number(lat).toFixed(5)},${Number(lng).toFixed(5)},${minutes}`;
+  return `v2:${Number(lat).toFixed(5)},${Number(lng).toFixed(5)},${minutes}`;
+}
+function isoCacheGet(key) {
+  return new Promise(resolve => db.isochroneCache.findOne({ key }, (err, doc) => resolve(err ? null : doc)));
+}
+function isoCacheSet(key, geojson, extendMinutes) {
+  db.isochroneCache.update({ key }, { key, geojson, extendMinutes, createdAt: Date.now() }, { upsert: true });
 }
 
 // The public ORS isochrone API rejects any range over 3600s (60 min). For
-// longer drive times we fetch the capped isochrone and tell the client how
-// many extra minutes to pad it by. Override if you self-host ORS with a
+// longer drive times we fetch the capped isochrone and pad it outward by the
+// remaining minutes as road distance. Override if you self-host ORS with a
 // higher limit (value in seconds).
 const ORS_MAX_RANGE_SEC = parseInt(process.env.ORS_MAX_RANGE_SEC) || 3600;
 
 app.post('/api/isochrone', async (req, res) => {
   const { lat, lng, minutes, force } = req.body;
   const apiKey = process.env.ORS_API_KEY;
-  const cacheKey = isoCacheKey(lat, lng, minutes);
-
-  // How much of the requested time exceeds the API cap → client buffers this.
+  const finalKey = isoCacheKey(lat, lng, minutes);                 // finished (buffered) shape
   const rangeSec = Math.min(minutes * 60, ORS_MAX_RANGE_SEC);
-  const extendMinutes = Math.max(0, minutes - rangeSec / 60);
+  const cappedMin = rangeSec / 60;
+  const rawKey = isoCacheKey(lat, lng, cappedMin);                 // raw capped isochrone
+  const extendMinutes = Math.max(0, minutes - cappedMin);
 
-  // Serve from cache unless an explicit refresh was requested.
+  // 1. Serve the finished shape straight from cache when possible.
   if (!force) {
-    const cached = await new Promise(resolve =>
-      db.isochroneCache.findOne({ key: cacheKey }, (err, doc) => resolve(err ? null : doc))
-    );
+    const cached = await isoCacheGet(finalKey);
     if (cached && cached.geojson) {
-      return res.json({ type: 'isochrone', geojson: cached.geojson, extendMinutes, cached: true });
+      return res.json({ type: 'isochrone', geojson: cached.geojson, extendMinutes: cached.extendMinutes || 0, cached: true });
     }
   }
 
@@ -164,21 +175,42 @@ app.post('/api/isochrone', async (req, res) => {
   }
 
   try {
-    const r = await fetch('https://api.openrouteservice.org/v2/isochrones/driving-car', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': apiKey },
-      body: JSON.stringify({ locations: [[lng, lat]], range: [rangeSec], range_type: 'time' })
-    });
-    const data = await r.json();
-    if (data.error || !data.features) {
-      const reason = data.error ? (data.error.message || JSON.stringify(data.error)) : 'no features returned';
-      console.warn(`ORS isochrone fell back to circle (${rangeSec}s): ${reason}`);
-      return res.json({ type: 'circle', lat, lng, radiusMeters: minutesToMeters(minutes), reason });
+    // 2. Get the raw capped isochrone — from cache (shared across ranges at the
+    //    same point) or from ORS.
+    let feature = null;
+    if (!force) {
+      const raw = await isoCacheGet(rawKey);
+      if (raw && raw.geojson) feature = raw.geojson;
     }
-    const feature = data.features[0];
-    // Persist for next time (upsert so a forced refresh overwrites the old one).
-    db.isochroneCache.update({ key: cacheKey }, { key: cacheKey, geojson: feature, createdAt: Date.now() }, { upsert: true });
-    res.json({ type: 'isochrone', geojson: feature, extendMinutes, cached: false });
+    if (!feature) {
+      const r = await fetch('https://api.openrouteservice.org/v2/isochrones/driving-car', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': apiKey },
+        body: JSON.stringify({ locations: [[lng, lat]], range: [rangeSec], range_type: 'time' })
+      });
+      const data = await r.json();
+      if (data.error || !data.features) {
+        const reason = data.error ? (data.error.message || JSON.stringify(data.error)) : 'no features returned';
+        console.warn(`ORS isochrone fell back to circle (${rangeSec}s): ${reason}`);
+        return res.json({ type: 'circle', lat, lng, radiusMeters: minutesToMeters(minutes), reason });
+      }
+      feature = data.features[0];
+      isoCacheSet(rawKey, feature, 0);
+    }
+
+    // 3. Pad beyond the cap once (server-side), and cache the finished shape so
+    //    the browser never has to buffer. If buffering fails, fall back to
+    //    letting the client buffer (extendMinutes carried through).
+    let finalGeo = feature, remaining = extendMinutes;
+    if (extendMinutes > 0) {
+      try {
+        const km = (extendMinutes / 60) * 50; // ~50mph
+        const buffered = turf.buffer(feature, km, { units: 'kilometers' });
+        if (buffered) { finalGeo = buffered; remaining = 0; }
+      } catch (e) { /* leave remaining for client to buffer */ }
+    }
+    isoCacheSet(finalKey, finalGeo, remaining);
+    res.json({ type: 'isochrone', geojson: finalGeo, extendMinutes: remaining, cached: false });
   } catch (e) {
     res.json({ type: 'circle', lat, lng, radiusMeters: minutesToMeters(minutes), reason: e.message });
   }
