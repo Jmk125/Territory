@@ -131,10 +131,20 @@ function isoCacheKey(lat, lng, minutes) {
   return `${Number(lat).toFixed(5)},${Number(lng).toFixed(5)},${minutes}`;
 }
 
+// The public ORS isochrone API rejects any range over 3600s (60 min). For
+// longer drive times we fetch the capped isochrone and tell the client how
+// many extra minutes to pad it by. Override if you self-host ORS with a
+// higher limit (value in seconds).
+const ORS_MAX_RANGE_SEC = parseInt(process.env.ORS_MAX_RANGE_SEC) || 3600;
+
 app.post('/api/isochrone', async (req, res) => {
   const { lat, lng, minutes, force } = req.body;
   const apiKey = process.env.ORS_API_KEY;
   const cacheKey = isoCacheKey(lat, lng, minutes);
+
+  // How much of the requested time exceeds the API cap → client buffers this.
+  const rangeSec = Math.min(minutes * 60, ORS_MAX_RANGE_SEC);
+  const extendMinutes = Math.max(0, minutes - rangeSec / 60);
 
   // Serve from cache unless an explicit refresh was requested.
   if (!force) {
@@ -142,7 +152,7 @@ app.post('/api/isochrone', async (req, res) => {
       db.isochroneCache.findOne({ key: cacheKey }, (err, doc) => resolve(err ? null : doc))
     );
     if (cached && cached.geojson) {
-      return res.json({ type: 'isochrone', geojson: cached.geojson, cached: true });
+      return res.json({ type: 'isochrone', geojson: cached.geojson, extendMinutes, cached: true });
     }
   }
 
@@ -154,18 +164,20 @@ app.post('/api/isochrone', async (req, res) => {
     const r = await fetch('https://api.openrouteservice.org/v2/isochrones/driving-car', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': apiKey },
-      body: JSON.stringify({ locations: [[lng, lat]], range: [minutes * 60], range_type: 'time' })
+      body: JSON.stringify({ locations: [[lng, lat]], range: [rangeSec], range_type: 'time' })
     });
     const data = await r.json();
     if (data.error || !data.features) {
-      return res.json({ type: 'circle', lat, lng, radiusMeters: minutesToMeters(minutes) });
+      const reason = data.error ? (data.error.message || JSON.stringify(data.error)) : 'no features returned';
+      console.warn(`ORS isochrone fell back to circle (${rangeSec}s): ${reason}`);
+      return res.json({ type: 'circle', lat, lng, radiusMeters: minutesToMeters(minutes), reason });
     }
     const feature = data.features[0];
     // Persist for next time (upsert so a forced refresh overwrites the old one).
     db.isochroneCache.update({ key: cacheKey }, { key: cacheKey, geojson: feature, createdAt: Date.now() }, { upsert: true });
-    res.json({ type: 'isochrone', geojson: feature, cached: false });
+    res.json({ type: 'isochrone', geojson: feature, extendMinutes, cached: false });
   } catch (e) {
-    res.json({ type: 'circle', lat, lng, radiusMeters: minutesToMeters(minutes) });
+    res.json({ type: 'circle', lat, lng, radiusMeters: minutesToMeters(minutes), reason: e.message });
   }
 });
 
