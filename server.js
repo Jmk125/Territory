@@ -3,7 +3,6 @@ const express = require('express');
 const Datastore = require('nedb');
 const fetch = require('node-fetch');
 const path = require('path');
-const turfBuffer = require('@turf/buffer');
 
 const app = express();
 const PORT = Number.parseInt(process.env.PORT, 10) || 3080;
@@ -35,7 +34,6 @@ app.get('/api/config', (req, res) => {
   res.json({
     showSplash: process.env.SHOW_SPLASH !== 'false',
     hasOrsKey: !!(process.env.ORS_API_KEY && process.env.ORS_API_KEY.trim()),
-    orsMaxMinutes: Math.round(ORS_MAX_RANGE_SEC / 60),
     splashColor
   });
 });
@@ -129,23 +127,23 @@ app.get('/api/geocode', async (req, res) => {
 // ─── Isochrone proxy (with persistent cache) ───────────────────────
 // A given coordinate + range always produces the same isochrone, so once
 // we've fetched it we store the geometry and serve every later request from
-// the local cache. This means the ORS key is only hit the first time a new
+// the local cache. This means ORS is only hit the first time a new
 // location/range combo appears — not on every coverage re-render.
 //
-// For drive times over the ORS cap we also pre-compute the outward buffer
-// (the "approximation") here and cache the FINISHED shape, so the expensive
-// turf.buffer runs once on the server instead of in every browser on every
-// page load. Cache key is versioned (v2) so older un-buffered entries are
-// ignored after this change and rebuilt correctly.
+// We send the full requested range straight to ORS and draw exactly what it
+// returns — no cap, no outward buffer "approximation". Self-hosting ORS lifts
+// the public API's 60-min limit, so longer drive times are real isochrones.
+// Cache key is versioned (v3) so older buffered/capped entries from the
+// previous approximation scheme are ignored and rebuilt correctly.
 function isoCacheKey(lat, lng, minutes) {
-  return `v2:${Number(lat).toFixed(5)},${Number(lng).toFixed(5)},${minutes}`;
+  return `v3:${Number(lat).toFixed(5)},${Number(lng).toFixed(5)},${minutes}`;
 }
 // A geometry is only useful if it actually has coordinates to draw. A null or
-// empty geometry can sneak into the cache when turf.buffer returns a Feature
-// with no geometry (it happens on some inputs) — and because the cache is
-// persistent, one bad entry would otherwise be served forever, so a range that
-// was poisoned during a past bug "never draws" even after the code is fixed.
-// Validating here lets poisoned entries fall through and rebuild themselves.
+// empty geometry can sneak into the cache when ORS returns a Feature with no
+// geometry — and because the cache is persistent, one bad entry would otherwise
+// be served forever, so a range that was poisoned during a past bug "never
+// draws" even after the code is fixed. Validating here lets poisoned entries
+// fall through and rebuild themselves.
 function hasDrawableGeometry(g) {
   if (!g) return false;
   if (g.type === 'FeatureCollection') return Array.isArray(g.features) && g.features.some(hasDrawableGeometry);
@@ -155,36 +153,31 @@ function hasDrawableGeometry(g) {
 function isoCacheGet(key) {
   return new Promise(resolve => db.isochroneCache.findOne({ key }, (err, doc) => resolve(err ? null : doc)));
 }
-function isoCacheSet(key, geojson, extendMinutes) {
-  db.isochroneCache.update({ key }, { key, geojson, extendMinutes, createdAt: Date.now() }, { upsert: true });
+function isoCacheSet(key, geojson) {
+  db.isochroneCache.update({ key }, { key, geojson, createdAt: Date.now() }, { upsert: true });
 }
 
-// The public ORS isochrone API rejects any range over 3600s (60 min). For
-// longer drive times we fetch the capped isochrone and pad it outward by the
-// remaining minutes as road distance. Override if you self-host ORS with a
-// higher limit (value in seconds).
-const ORS_MAX_RANGE_SEC = parseInt(process.env.ORS_MAX_RANGE_SEC) || 3600;
-
 // Base URL for the ORS API. Defaults to the public endpoint; point this at a
-// self-hosted instance (e.g. http://192.168.1.50:8080/ors) to lift the
-// public 60-min isochrone cap and serve everything from your own machine.
+// self-hosted instance (e.g. http://localhost:8082/ors) to lift the public
+// 60-min isochrone cap and serve everything from your own machine. Note that a
+// self-hosted instance enforces its OWN isochrone limit (ors-config:
+// endpoints.isochrones.maximum_range_time, default 3600s) — raise that there if
+// you want ranges beyond 60 min, otherwise ORS rejects them and we draw a
+// circle (see deploy/README.md and .env.example).
 // Trailing slashes are trimmed so we can append the /v2/... path cleanly.
 const ORS_BASE_URL = (process.env.ORS_BASE_URL || 'https://api.openrouteservice.org').replace(/\/+$/, '');
 
 app.post('/api/isochrone', async (req, res) => {
   const { lat, lng, minutes, force } = req.body;
   const apiKey = process.env.ORS_API_KEY;
-  const finalKey = isoCacheKey(lat, lng, minutes);                 // finished (buffered) shape
-  const rangeSec = Math.min(minutes * 60, ORS_MAX_RANGE_SEC);
-  const cappedMin = rangeSec / 60;
-  const rawKey = isoCacheKey(lat, lng, cappedMin);                 // raw capped isochrone
-  const extendMinutes = Math.max(0, minutes - cappedMin);
+  const key = isoCacheKey(lat, lng, minutes);
+  const rangeSec = minutes * 60;   // full requested range — no cap, no buffer
 
-  // 1. Serve the finished shape straight from cache when possible.
+  // 1. Serve the cached isochrone straight from cache when possible.
   if (!force) {
-    const cached = await isoCacheGet(finalKey);
+    const cached = await isoCacheGet(key);
     if (cached && hasDrawableGeometry(cached.geojson)) {
-      return res.json({ type: 'isochrone', geojson: cached.geojson, extendMinutes: cached.extendMinutes || 0, cached: true });
+      return res.json({ type: 'isochrone', geojson: cached.geojson, cached: true });
     }
   }
 
@@ -193,48 +186,26 @@ app.post('/api/isochrone', async (req, res) => {
   }
 
   try {
-    // 2. Get the raw capped isochrone — from cache (shared across ranges at the
-    //    same point) or from ORS.
-    let feature = null;
-    if (!force) {
-      const raw = await isoCacheGet(rawKey);
-      if (raw && hasDrawableGeometry(raw.geojson)) feature = raw.geojson;
+    // 2. Ask ORS for the isochrone at the full requested range and draw exactly
+    //    what it returns. If ORS can't honor the range (e.g. it exceeds the
+    //    instance's configured maximum_range), fall back to a circle and log why.
+    const r = await fetch(`${ORS_BASE_URL}/v2/isochrones/driving-car`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': apiKey },
+      body: JSON.stringify({ locations: [[lng, lat]], range: [rangeSec], range_type: 'time' })
+    });
+    const data = await r.json();
+    if (data.error || !data.features) {
+      const reason = data.error ? (data.error.message || JSON.stringify(data.error)) : 'no features returned';
+      console.warn(`ORS isochrone fell back to circle (range=${rangeSec}s, HTTP ${r.status}): ${reason}`);
+      return res.json({ type: 'circle', lat, lng, radiusMeters: minutesToMeters(minutes), reason });
     }
-    if (!feature) {
-      const r = await fetch(`${ORS_BASE_URL}/v2/isochrones/driving-car`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': apiKey },
-        body: JSON.stringify({ locations: [[lng, lat]], range: [rangeSec], range_type: 'time' })
-      });
-      const data = await r.json();
-      if (data.error || !data.features) {
-        const reason = data.error ? (data.error.message || JSON.stringify(data.error)) : 'no features returned';
-        console.warn(`ORS isochrone fell back to circle (${rangeSec}s): ${reason}`);
-        return res.json({ type: 'circle', lat, lng, radiusMeters: minutesToMeters(minutes), reason });
-      }
-      feature = data.features[0];
-      isoCacheSet(rawKey, feature, 0);
-    }
-
-    // 3. Pad beyond the cap once (server-side), and cache the finished shape so
-    //    the browser never has to buffer. If buffering fails, fall back to
-    //    letting the client buffer (extendMinutes carried through).
-    let finalGeo = feature, remaining = extendMinutes;
-    if (extendMinutes > 0) {
-      try {
-        const km = (extendMinutes / 60) * 50; // ~50mph
-        const buffered = turfBuffer(feature, km, { units: 'kilometers' });
-        // Only accept the buffered shape if it actually produced geometry;
-        // otherwise keep the capped isochrone and let the client pad it, so a
-        // failed buffer never gets cached as a blank shape that won't draw.
-        if (hasDrawableGeometry(buffered)) { finalGeo = buffered; remaining = 0; }
-        else console.warn(`turf.buffer produced no geometry for ${minutes}min @ ${lat},${lng}; deferring pad to client`);
-      } catch (e) { /* leave remaining for client to buffer */ }
-    }
+    const feature = data.features[0];
     // Never persist a shape we can't draw — that would poison the cache.
-    if (hasDrawableGeometry(finalGeo)) isoCacheSet(finalKey, finalGeo, remaining);
-    res.json({ type: 'isochrone', geojson: finalGeo, extendMinutes: remaining, cached: false });
+    if (hasDrawableGeometry(feature)) isoCacheSet(key, feature);
+    res.json({ type: 'isochrone', geojson: feature, cached: false });
   } catch (e) {
+    console.warn(`ORS isochrone request failed (range=${rangeSec}s): ${e.message}`);
     res.json({ type: 'circle', lat, lng, radiusMeters: minutesToMeters(minutes), reason: e.message });
   }
 });
