@@ -10,7 +10,10 @@ const PORT = process.env.PORT || 3080;
 // Databases
 const db = {
   locationTypes: new Datastore({ filename: path.join(__dirname, 'data/locationTypes.db'), autoload: true }),
-  locations: new Datastore({ filename: path.join(__dirname, 'data/locations.db'), autoload: true })
+  locations: new Datastore({ filename: path.join(__dirname, 'data/locations.db'), autoload: true }),
+  // Persistent cache of computed isochrones so we only call the ORS key once
+  // per unique coordinate+range instead of on every map render.
+  isochroneCache: new Datastore({ filename: path.join(__dirname, 'data/isochroneCache.db'), autoload: true })
 };
 
 app.use(express.json());
@@ -117,10 +120,29 @@ app.get('/api/geocode', async (req, res) => {
   }
 });
 
-// ─── Isochrone proxy ───────────────────────────────────────────────
+// ─── Isochrone proxy (with persistent cache) ───────────────────────
+// A given coordinate + range always produces the same isochrone, so once
+// we've fetched it we store the geometry and serve every later request from
+// the local cache. This means the ORS key is only hit the first time a new
+// location/range combo appears — not on every coverage re-render.
+function isoCacheKey(lat, lng, minutes) {
+  return `${Number(lat).toFixed(5)},${Number(lng).toFixed(5)},${minutes}`;
+}
+
 app.post('/api/isochrone', async (req, res) => {
-  const { lat, lng, minutes } = req.body;
+  const { lat, lng, minutes, force } = req.body;
   const apiKey = process.env.ORS_API_KEY;
+  const cacheKey = isoCacheKey(lat, lng, minutes);
+
+  // Serve from cache unless an explicit refresh was requested.
+  if (!force) {
+    const cached = await new Promise(resolve =>
+      db.isochroneCache.findOne({ key: cacheKey }, (err, doc) => resolve(err ? null : doc))
+    );
+    if (cached && cached.geojson) {
+      return res.json({ type: 'isochrone', geojson: cached.geojson, cached: true });
+    }
+  }
 
   if (!apiKey || !apiKey.trim()) {
     return res.json({ type: 'circle', lat, lng, radiusMeters: minutesToMeters(minutes) });
@@ -136,7 +158,10 @@ app.post('/api/isochrone', async (req, res) => {
     if (data.error || !data.features) {
       return res.json({ type: 'circle', lat, lng, radiusMeters: minutesToMeters(minutes) });
     }
-    res.json({ type: 'isochrone', geojson: data.features[0] });
+    const feature = data.features[0];
+    // Persist for next time (upsert so a forced refresh overwrites the old one).
+    db.isochroneCache.update({ key: cacheKey }, { key: cacheKey, geojson: feature, createdAt: Date.now() }, { upsert: true });
+    res.json({ type: 'isochrone', geojson: feature, cached: false });
   } catch (e) {
     res.json({ type: 'circle', lat, lng, radiusMeters: minutesToMeters(minutes) });
   }
