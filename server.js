@@ -165,6 +165,12 @@ function isoCacheSet(key, geojson, extendMinutes) {
 // higher limit (value in seconds).
 const ORS_MAX_RANGE_SEC = parseInt(process.env.ORS_MAX_RANGE_SEC) || 3600;
 
+// Base URL for the ORS API. Defaults to the public endpoint; point this at a
+// self-hosted instance (e.g. http://192.168.1.50:8080/ors) to lift the
+// public 60-min isochrone cap and serve everything from your own machine.
+// Trailing slashes are trimmed so we can append the /v2/... path cleanly.
+const ORS_BASE_URL = (process.env.ORS_BASE_URL || 'https://api.openrouteservice.org').replace(/\/+$/, '');
+
 app.post('/api/isochrone', async (req, res) => {
   const { lat, lng, minutes, force } = req.body;
   const apiKey = process.env.ORS_API_KEY;
@@ -195,7 +201,7 @@ app.post('/api/isochrone', async (req, res) => {
       if (raw && hasDrawableGeometry(raw.geojson)) feature = raw.geojson;
     }
     if (!feature) {
-      const r = await fetch('https://api.openrouteservice.org/v2/isochrones/driving-car', {
+      const r = await fetch(`${ORS_BASE_URL}/v2/isochrones/driving-car`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': apiKey },
         body: JSON.stringify({ locations: [[lng, lat]], range: [rangeSec], range_type: 'time' })
@@ -272,7 +278,7 @@ app.post('/api/travel-times', async (req, res) => {
       try {
         const locations = misses.map(i => [from[i].lng, from[i].lat]);
         locations.push([to.lng, to.lat]);
-        const r = await fetch('https://api.openrouteservice.org/v2/matrix/driving-car', {
+        const r = await fetch(`${ORS_BASE_URL}/v2/matrix/driving-car`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'Authorization': apiKey },
           body: JSON.stringify({ locations, sources: misses.map((_, k) => k), destinations: [misses.length], metrics: ['duration'] })
