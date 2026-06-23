@@ -34,6 +34,7 @@ app.get('/api/config', (req, res) => {
   res.json({
     showSplash: process.env.SHOW_SPLASH !== 'false',
     hasOrsKey: !!(process.env.ORS_API_KEY && process.env.ORS_API_KEY.trim()),
+    orsMaxMinutes: Math.round(ORS_MAX_RANGE_SEC / 60),
     splashColor
   });
 });
