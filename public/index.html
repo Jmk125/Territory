@@ -1,0 +1,918 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Project Secret Wishes 🔒</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://unpkg.com/@turf/turf@6/turf.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg: #0f1117;
+      --surface: #1a1d27;
+      --surface2: #222636;
+      --border: #2e3348;
+      --accent: #4f8ef7;
+      --accent2: #f7c94f;
+      --danger: #e05252;
+      --success: #4fba7c;
+      --text: #e2e6f0;
+      --text2: #8892a4;
+      --radius: 8px;
+    }
+    body { background: var(--bg); color: var(--text); font-family: 'Segoe UI', system-ui, sans-serif; height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+
+    /* ── SPLASH ── */
+    #splash {
+      position: fixed; inset: 0; z-index: 9999;
+      background: #000;
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      overflow: hidden;
+    }
+    #splash .scanlines {
+      position: absolute; inset: 0; pointer-events: none;
+      background: repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,0,0,0.4) 2px, rgba(0,0,0,0.4) 4px);
+    }
+    #splash .stamp-wrapper { position: relative; animation: splashIn 0.6s cubic-bezier(0.22, 1, 0.36, 1) forwards; }
+    @keyframes splashIn { from { transform: scale(3) rotate(-8deg); opacity: 0; } to { transform: scale(1) rotate(-6deg); opacity: 1; } }
+    #splash .stamp {
+      border: 8px solid var(--splash-main); border-radius: 4px; padding: 28px 48px;
+      text-align: center; position: relative;
+    }
+    #splash .stamp::before, #splash .stamp::after {
+      content: ''; position: absolute; inset: 4px; border: 3px solid var(--splash-faint); border-radius: 2px; pointer-events: none;
+    }
+    #splash .splash-title {
+      font-size: 4.2rem; font-weight: 900; letter-spacing: 0.05em;
+      color: var(--splash-main); text-transform: uppercase; line-height: 1;
+      text-shadow: 0 0 40px var(--splash-glow), 0 0 80px var(--splash-glowFar);
+      font-family: 'Arial Black', Arial, sans-serif;
+    }
+    #splash .splash-sub {
+      font-size: 1.1rem; color: var(--splash-main); letter-spacing: 0.35em;
+      margin-top: 10px; text-transform: uppercase; font-weight: 700;
+      opacity: 0.85;
+    }
+    #splash .splash-exclaim {
+      font-size: 3rem; color: var(--splash-main); margin-bottom: 12px;
+      animation: blink 0.5s step-end infinite alternate;
+    }
+    @keyframes blink { from { opacity: 1; } to { opacity: 0.2; } }
+
+    /* Fixed bar — always full width red; inner track scrolls */
+    .warning-tape-bar {
+      position: absolute; left: 0; right: 0;
+      background: var(--splash-main); overflow: hidden;
+      height: 34px; display: flex; align-items: center;
+    }
+    .warning-tape-bar.top { top: 0; }
+    .warning-tape-bar.bottom { bottom: 0; }
+    .warning-tape-inner {
+      display: flex; gap: 0; white-space: nowrap; will-change: transform;
+      color: #fff; font-size: 0.75rem; font-weight: 800;
+      letter-spacing: 0.2em; text-transform: uppercase;
+    }
+    .warning-tape-inner span { padding: 0 24px; }
+    .warning-tape-inner.fwd  { animation: tape-fwd  14s linear infinite; }
+    .warning-tape-inner.rev  { animation: tape-rev  11s linear infinite; }
+    @keyframes tape-fwd { from { transform: translateX(0); }    to { transform: translateX(-50%); } }
+    @keyframes tape-rev { from { transform: translateX(-50%); } to { transform: translateX(0); } }
+
+    @keyframes scroll-warn {
+      0% { transform: translateX(0); }
+      100% { transform: translateX(-50%); }
+    }
+    #splash .corner-decal {
+      position: absolute; font-size: 0.6rem; font-weight: 800;
+      color: var(--splash-fainter); letter-spacing: 0.15em; text-transform: uppercase;
+    }
+    #splash .corner-decal.tl { top: 12px; left: 16px; }
+    #splash .corner-decal.tr { top: 12px; right: 16px; }
+    #splash .corner-decal.bl { bottom: 12px; left: 16px; }
+    #splash .corner-decal.br { bottom: 12px; right: 16px; }
+    #splash .enter-btn {
+      margin-top: 36px; padding: 14px 48px;
+      background: transparent; border: 2px solid var(--splash-main);
+      color: var(--splash-main); font-size: 1rem; font-weight: 800;
+      letter-spacing: 0.2em; text-transform: uppercase;
+      cursor: pointer; transition: all 0.2s;
+    }
+    #splash .enter-btn:hover { background: var(--splash-main); color: #000; box-shadow: 0 0 30px var(--splash-glow); }
+    #splash .classified-id { margin-top: 16px; font-size: 0.65rem; color: var(--splash-faint); letter-spacing: 0.15em; }
+
+    /* ── HEADER ── */
+    header {
+      background: var(--surface); border-bottom: 1px solid var(--border);
+      padding: 0 20px; display: flex; align-items: center; gap: 16px;
+      height: 52px; flex-shrink: 0;
+    }
+    header h1 { font-size: 1rem; font-weight: 700; color: var(--text2); letter-spacing: 0.05em; text-transform: uppercase; }
+    header h1 span { color: var(--accent); }
+    .badge-ors { font-size: 0.65rem; padding: 3px 8px; border-radius: 12px; font-weight: 700; letter-spacing: 0.05em; }
+    .badge-ors.active { background: rgba(79,186,124,0.15); color: var(--success); border: 1px solid rgba(79,186,124,0.3); }
+    .badge-ors.fallback { background: rgba(247,201,79,0.12); color: var(--accent2); border: 1px solid rgba(247,201,79,0.3); }
+
+    /* ── TABS ── */
+    .tabs { display: flex; border-bottom: 1px solid var(--border); background: var(--surface); padding: 0 20px; gap: 4px; flex-shrink: 0; }
+    .tab-btn {
+      padding: 10px 20px; background: none; border: none; color: var(--text2);
+      font-size: 0.875rem; font-weight: 600; cursor: pointer;
+      border-bottom: 2px solid transparent; transition: all 0.15s; margin-bottom: -1px;
+      letter-spacing: 0.03em;
+    }
+    .tab-btn:hover { color: var(--text); }
+    .tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+    /* ── PANELS ── */
+    .panel { display: none; flex: 1; overflow: hidden; }
+    .panel.active { display: flex; }
+
+    /* ── MAP PANEL ── */
+    #panel-map { position: relative; }
+    #map { flex: 1; height: 100%; }
+    .map-controls {
+      position: absolute; top: 12px; right: 12px; z-index: 800;
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 12px; width: 220px;
+      display: flex; flex-direction: column; gap: 10px;
+    }
+    .map-controls h3 { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text2); margin-bottom: 2px; }
+    .map-ctrl-row { display: flex; align-items: center; gap: 8px; font-size: 0.8rem; }
+    .map-ctrl-row label { flex: 1; }
+    .toggle-switch { position: relative; width: 36px; height: 20px; }
+    .toggle-switch input { opacity: 0; width: 0; height: 0; }
+    .toggle-switch .slider {
+      position: absolute; inset: 0; background: var(--border); border-radius: 20px; cursor: pointer; transition: 0.2s;
+    }
+    .toggle-switch .slider:before {
+      content: ''; position: absolute; width: 14px; height: 14px; left: 3px; bottom: 3px;
+      background: #fff; border-radius: 50%; transition: 0.2s;
+    }
+    .toggle-switch input:checked + .slider { background: var(--accent); }
+    .toggle-switch input:checked + .slider:before { transform: translateX(16px); }
+    .type-legend { display: flex; flex-direction: column; gap: 6px; }
+    .legend-item { display: flex; align-items: center; gap: 8px; font-size: 0.8rem; }
+    .legend-swatch { width: 14px; height: 14px; border-radius: 50%; flex-shrink: 0; }
+    .legend-combined { display: flex; align-items: center; gap: 8px; font-size: 0.8rem; cursor: pointer; }
+    .legend-combined input[type=checkbox] { accent-color: var(--accent); }
+
+    /* ── CONFIGURE PANEL ── */
+    #panel-config {
+      flex-direction: row; overflow: hidden;
+    }
+    .config-sidebar {
+      width: 260px; flex-shrink: 0; background: var(--surface);
+      border-right: 1px solid var(--border); display: flex; flex-direction: column;
+      overflow: hidden;
+    }
+    .config-sidebar-header {
+      padding: 16px; border-bottom: 1px solid var(--border);
+      font-size: 0.75rem; font-weight: 700; text-transform: uppercase;
+      letter-spacing: 0.08em; color: var(--text2);
+      display: flex; justify-content: space-between; align-items: center;
+    }
+    .config-main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+    .config-main-header {
+      padding: 16px 20px; border-bottom: 1px solid var(--border);
+      display: flex; justify-content: space-between; align-items: center;
+    }
+    .config-main-header h2 { font-size: 1rem; font-weight: 700; }
+    .config-main-header .sub { font-size: 0.8rem; color: var(--text2); margin-top: 2px; }
+    .config-scroll { flex: 1; overflow-y: auto; padding: 16px 20px; }
+
+    /* Location type list */
+    .type-list { display: flex; flex-direction: column; gap: 2px; overflow-y: auto; flex: 1; padding: 8px; }
+    .type-item {
+      display: flex; align-items: center; gap: 10px; padding: 10px 12px;
+      border-radius: var(--radius); cursor: pointer; transition: background 0.1s;
+      border: 1px solid transparent;
+    }
+    .type-item:hover { background: var(--surface2); }
+    .type-item.active { background: var(--surface2); border-color: var(--accent); }
+    .type-dot { width: 12px; height: 12px; border-radius: 50%; flex-shrink: 0; }
+    .type-name { flex: 1; font-size: 0.875rem; font-weight: 600; }
+    .type-count { font-size: 0.72rem; color: var(--text2); }
+    .type-item .del-btn { opacity: 0; background: none; border: none; color: var(--danger); cursor: pointer; font-size: 1rem; line-height: 1; transition: opacity 0.1s; padding: 0 2px; }
+    .type-item:hover .del-btn { opacity: 1; }
+
+    /* Add type form */
+    .add-type-form {
+      padding: 12px 8px; border-top: 1px solid var(--border);
+      display: flex; flex-direction: column; gap: 8px;
+    }
+    .add-type-form .row { display: flex; gap: 8px; }
+
+    /* Inputs */
+    input[type=text], input[type=number], select {
+      background: var(--surface2); border: 1px solid var(--border);
+      color: var(--text); border-radius: var(--radius); padding: 8px 10px;
+      font-size: 0.875rem; width: 100%; outline: none; transition: border-color 0.15s;
+    }
+    input[type=text]:focus, input[type=number]:focus, select:focus { border-color: var(--accent); }
+    input[type=color] { width: 40px; height: 36px; padding: 2px; border-radius: var(--radius); border: 1px solid var(--border); background: var(--surface2); cursor: pointer; flex-shrink: 0; }
+    label.field-label { font-size: 0.75rem; color: var(--text2); font-weight: 600; letter-spacing: 0.04em; margin-bottom: 4px; display: block; }
+
+    /* Buttons */
+    .btn {
+      padding: 8px 16px; border-radius: var(--radius); font-size: 0.875rem;
+      font-weight: 600; cursor: pointer; border: none; transition: all 0.15s; display: inline-flex; align-items: center; gap: 6px;
+    }
+    .btn-primary { background: var(--accent); color: #fff; }
+    .btn-primary:hover { background: #3a7de8; }
+    .btn-success { background: var(--success); color: #fff; }
+    .btn-success:hover { background: #3aaa6a; }
+    .btn-danger { background: var(--danger); color: #fff; }
+    .btn-danger:hover { background: #c94444; }
+    .btn-ghost { background: var(--surface2); color: var(--text); border: 1px solid var(--border); }
+    .btn-ghost:hover { border-color: var(--accent); color: var(--accent); }
+    .btn-sm { padding: 5px 10px; font-size: 0.8rem; }
+
+    /* Location cards */
+    .locations-grid { display: flex; flex-direction: column; gap: 10px; }
+    .loc-card {
+      background: var(--surface2); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 14px 16px;
+      display: flex; align-items: flex-start; gap: 12px;
+    }
+    .loc-card .loc-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; margin-top: 4px; }
+    .loc-card .loc-info { flex: 1; min-width: 0; }
+    .loc-card .loc-name { font-weight: 700; font-size: 0.9rem; }
+    .loc-card .loc-addr { font-size: 0.78rem; color: var(--text2); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .loc-card .loc-radius { font-size: 0.75rem; color: var(--accent2); margin-top: 4px; }
+    .loc-card .loc-actions { display: flex; gap: 6px; flex-shrink: 0; }
+
+    /* Add location form */
+    .add-loc-form {
+      background: var(--surface2); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 16px; margin-bottom: 16px;
+      display: flex; flex-direction: column; gap: 10px;
+    }
+    .add-loc-form .row { display: flex; gap: 10px; }
+    .add-loc-form .row > * { flex: 1; }
+    .geocode-results {
+      background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius);
+      position: absolute; z-index: 100; width: 100%; max-height: 200px; overflow-y: auto;
+    }
+    .geocode-results .geo-option {
+      padding: 8px 12px; font-size: 0.8rem; cursor: pointer; border-bottom: 1px solid var(--border);
+    }
+    .geocode-results .geo-option:hover { background: var(--surface2); }
+    .pos-relative { position: relative; }
+    .coords-display { font-size: 0.72rem; color: var(--text2); }
+
+    /* Empty state */
+    .empty-state { text-align: center; padding: 48px 24px; color: var(--text2); }
+    .empty-state .icon { font-size: 2.5rem; margin-bottom: 12px; }
+    .empty-state p { font-size: 0.875rem; }
+
+    /* Scrollbar */
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+    /* No-type-selected */
+    .no-type { display: flex; align-items: center; justify-content: center; flex: 1; }
+    .no-type-inner { text-align: center; color: var(--text2); }
+    .no-type-inner .icon { font-size: 3rem; margin-bottom: 16px; }
+
+    /* Edit inline */
+    .editing-highlight { border-color: var(--accent) !important; }
+
+    /* Coverage mode radio group */
+    .radio-group { display: flex; gap: 0; border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+    .radio-group label { flex: 1; text-align: center; font-size: 0.75rem; font-weight: 600; padding: 6px 8px; cursor: pointer; color: var(--text2); transition: all 0.15s; }
+    .radio-group input { display: none; }
+    .radio-group input:checked + label { background: var(--accent); color: #fff; }
+
+    .section-divider { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text2); font-weight: 700; margin: 8px 0 4px; }
+
+    .hint { font-size: 0.72rem; color: var(--text2); }
+  </style>
+</head>
+<body>
+
+<!-- ══════════════════════════════════════════════
+     SPLASH SCREEN
+═══════════════════════════════════════════════ -->
+<div id="splash" style="display:none;">
+  <div class="scanlines"></div>
+
+  <!-- TOP BAR — fixed red, text scrolls inside -->
+  <div class="warning-tape-bar top">
+    <div class="warning-tape-inner fwd">
+      <span>⚠ CLASSIFIED ⚠</span><span>EYES ONLY</span><span>⚠ TOP SECRET ⚠</span><span>DO NOT DISTRIBUTE</span><span>⚠ CLASSIFIED ⚠</span><span>EYES ONLY</span><span>⚠ TOP SECRET ⚠</span><span>DO NOT DISTRIBUTE</span><span>⚠ CLASSIFIED ⚠</span><span>EYES ONLY</span><span>⚠ TOP SECRET ⚠</span><span>DO NOT DISTRIBUTE</span><span>⚠ CLASSIFIED ⚠</span><span>EYES ONLY</span><span>⚠ TOP SECRET ⚠</span><span>DO NOT DISTRIBUTE</span>
+    </div>
+  </div>
+
+  <div class="stamp-wrapper">
+    <div class="stamp">
+      <span class="corner-decal tl">FILE: 0047-ALPHA</span>
+      <span class="corner-decal tr">CLEARANCE: TS/SCI</span>
+      <span class="corner-decal bl">NOFORN · ORCON</span>
+      <span class="corner-decal br">REF: PSW-2025</span>
+
+      <div class="splash-exclaim">!! !! !!</div>
+      <div class="splash-title">PROJECT<br>SECRET<br>WISHES</div>
+      <div class="splash-sub">⚠ &nbsp; CONFIDENTIAL &nbsp; ⚠</div>
+    </div>
+  </div>
+
+  <button class="enter-btn" onclick="dismissSplash()">[ GRANT ACCESS ]</button>
+  <div class="classified-id">AUTHORIZATION CODE: ████████ &nbsp;|&nbsp; DOCUMENT: PSW-TERR-001 &nbsp;|&nbsp; HANDLE VIA BIGOT LIST ONLY</div>
+
+  <!-- BOTTOM BAR — fixed red, text scrolls inside in reverse -->
+  <div class="warning-tape-bar bottom">
+    <div class="warning-tape-inner rev">
+      <span>🔒 UNAUTHORIZED ACCESS PROHIBITED 🔒</span><span>PENALTY: MANDATORY PIZZA PARTY REVOCATION</span><span>🔒 UNAUTHORIZED ACCESS PROHIBITED 🔒</span><span>PENALTY: MANDATORY PIZZA PARTY REVOCATION</span><span>🔒 UNAUTHORIZED ACCESS PROHIBITED 🔒</span><span>PENALTY: MANDATORY PIZZA PARTY REVOCATION</span><span>🔒 UNAUTHORIZED ACCESS PROHIBITED 🔒</span><span>PENALTY: MANDATORY PIZZA PARTY REVOCATION</span>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════
+     MAIN APP
+═══════════════════════════════════════════════ -->
+<header>
+  <h1>🗺 <span>Territory</span> Intelligence</h1>
+  <span id="ors-badge" class="badge-ors fallback">⚪ Circle Mode</span>
+  <div style="flex:1"></div>
+  <span style="font-size:0.7rem; color:var(--text2); letter-spacing:0.08em;">PROJECT SECRET WISHES</span>
+</header>
+
+<div class="tabs">
+  <button class="tab-btn active" onclick="switchTab('map')">🗺 Map View</button>
+  <button class="tab-btn" onclick="switchTab('config')">⚙ Configure</button>
+</div>
+
+<!-- MAP PANEL -->
+<div id="panel-map" class="panel active">
+  <div id="map"></div>
+
+  <div class="map-controls">
+    <h3>Coverage Display</h3>
+
+    <div class="section-divider">View Mode</div>
+    <div class="radio-group">
+      <input type="radio" name="cov-mode" id="mode-merged" value="merged" checked onchange="renderCoverage()">
+      <label for="mode-merged">Merged</label>
+      <input type="radio" name="cov-mode" id="mode-heat" value="heat" onchange="renderCoverage()">
+      <label for="mode-heat">Heat Map</label>
+    </div>
+
+    <div class="section-divider">Location Types</div>
+    <div id="type-legend" class="type-legend">
+      <span class="hint">No types yet</span>
+    </div>
+
+    <div class="section-divider">Combined View</div>
+    <div class="legend-combined">
+      <input type="checkbox" id="show-combined" onchange="renderCoverage()">
+      <label for="show-combined" style="cursor:pointer; font-size:0.8rem;">Show all types combined</label>
+    </div>
+
+    <button class="btn btn-ghost btn-sm" onclick="refreshMap()" style="margin-top:4px;">↺ Refresh Coverage</button>
+  </div>
+</div>
+
+<!-- CONFIG PANEL -->
+<div id="panel-config" class="panel">
+  <!-- Sidebar: Location Types -->
+  <div class="config-sidebar">
+    <div class="config-sidebar-header">
+      <span>Location Types</span>
+    </div>
+    <div class="type-list" id="type-list"></div>
+    <div class="add-type-form">
+      <div class="section-divider" style="margin-top:0">New Type</div>
+      <input type="text" id="new-type-name" placeholder="e.g. Superintendent" />
+      <div class="row" style="gap:8px; align-items:center">
+        <div style="flex:1">
+          <label class="field-label">Default Coverage</label>
+          <div class="row" style="gap:4px">
+            <input type="number" id="new-type-radius" placeholder="60" min="1" max="300" style="flex:1" />
+            <select id="new-type-unit" style="flex:1; padding:8px 6px;">
+              <option value="minutes">min</option>
+              <option value="miles">mi</option>
+            </select>
+          </div>
+        </div>
+        <div>
+          <label class="field-label">Color</label>
+          <input type="color" id="new-type-color" value="#4f8ef7" />
+        </div>
+      </div>
+      <button class="btn btn-success btn-sm" onclick="addLocationType()">+ Add Type</button>
+    </div>
+  </div>
+
+  <!-- Main area: Locations for selected type -->
+  <div class="config-main" id="config-main">
+    <div class="no-type">
+      <div class="no-type-inner">
+        <div class="icon">👈</div>
+        <p>Select a location type<br>to manage its locations</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+// ══════════════════════════════════
+// STATE
+// ══════════════════════════════════
+let map, coverageLayer, pinLayer;
+let locationTypes = [];
+let locations = [];
+let selectedTypeId = null;
+let geocodeTimer = null;
+let hasOrsKey = false;
+let editingLocId = null;
+
+// ══════════════════════════════════
+// INIT
+// ══════════════════════════════════
+async function init() {
+  const cfg = await fetch('/api/config').then(r => r.json());
+  hasOrsKey = cfg.hasOrsKey;
+
+  const badge = document.getElementById('ors-badge');
+  if (hasOrsKey) {
+    badge.textContent = '🟢 Isochrone Mode';
+    badge.className = 'badge-ors active';
+  }
+
+  // Apply splash color theme as CSS variables on the splash element
+  if (cfg.splashColor) {
+    const s = cfg.splashColor;
+    const splash = document.getElementById('splash');
+    splash.style.setProperty('--splash-main',    s.main);
+    splash.style.setProperty('--splash-dark',    s.dark);
+    splash.style.setProperty('--splash-glow',    s.glow);
+    splash.style.setProperty('--splash-glowFar', s.glowFar);
+    splash.style.setProperty('--splash-faint',   s.faint);
+    splash.style.setProperty('--splash-fainter', s.fainter);
+  }
+
+  if (cfg.showSplash) {
+    document.getElementById('splash').style.display = 'flex';
+  }
+
+  initMap();
+  await loadAll();
+}
+
+function dismissSplash() {
+  const splash = document.getElementById('splash');
+  splash.style.transition = 'opacity 0.5s';
+  splash.style.opacity = '0';
+  setTimeout(() => splash.style.display = 'none', 500);
+}
+
+// ══════════════════════════════════
+// MAP
+// ══════════════════════════════════
+function initMap() {
+  map = L.map('map', { center: [40.4173, -82.9071], zoom: 7 });
+
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '© OpenStreetMap contributors', maxZoom: 19
+  }).addTo(map);
+
+  coverageLayer = L.layerGroup().addTo(map);
+  pinLayer = L.layerGroup().addTo(map);
+
+  // Allow clicking on map to set location coords when adding
+  map.on('click', (e) => {
+    const latEl = document.getElementById('new-loc-lat');
+    const lngEl = document.getElementById('new-loc-lng');
+    if (latEl && lngEl && document.getElementById('panel-config').classList.contains('active')) {
+      latEl.value = e.latlng.lat.toFixed(6);
+      lngEl.value = e.latlng.lng.toFixed(6);
+      document.getElementById('new-loc-addr').value = `${e.latlng.lat.toFixed(4)}, ${e.latlng.lng.toFixed(4)}`;
+    }
+  });
+}
+
+function refreshMap() {
+  loadAll();
+}
+
+// ══════════════════════════════════
+// DATA LOAD
+// ══════════════════════════════════
+async function loadAll() {
+  [locationTypes, locations] = await Promise.all([
+    fetch('/api/location-types').then(r => r.json()),
+    fetch('/api/locations').then(r => r.json())
+  ]);
+  renderTypeList();
+  renderTypeLegend();
+  renderPins();
+  renderCoverage();
+  if (selectedTypeId) renderLocationsList();
+}
+
+// ══════════════════════════════════
+// TABS
+// ══════════════════════════════════
+function switchTab(tab) {
+  document.querySelectorAll('.tab-btn').forEach((b,i) => b.classList.toggle('active', ['map','config'][i] === tab));
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+  document.getElementById('panel-' + tab).classList.add('active');
+  if (tab === 'map') setTimeout(() => map.invalidateSize(), 50);
+}
+
+// ══════════════════════════════════
+// LOCATION TYPES
+// ══════════════════════════════════
+function renderTypeList() {
+  const list = document.getElementById('type-list');
+  if (!locationTypes.length) {
+    list.innerHTML = '<div class="empty-state" style="padding:24px 12px"><div class="icon">🏷</div><p>No types yet.<br>Add one below.</p></div>';
+    return;
+  }
+  list.innerHTML = locationTypes.map(t => {
+    const count = locations.filter(l => l.typeId === t._id).length;
+    return `<div class="type-item ${selectedTypeId === t._id ? 'active' : ''}" onclick="selectType('${t._id}')">
+      <div class="type-dot" style="background:${t.color}"></div>
+      <span class="type-name">${t.name}</span>
+      <span class="type-count">${count} loc${count !== 1 ? 's' : ''}</span>
+      <button class="del-btn" onclick="event.stopPropagation(); deleteType('${t._id}')" title="Delete type">✕</button>
+    </div>`;
+  }).join('');
+}
+
+function renderTypeLegend() {
+  const el = document.getElementById('type-legend');
+  if (!locationTypes.length) { el.innerHTML = '<span class="hint">No types yet</span>'; return; }
+  el.innerHTML = locationTypes.map(t => `
+    <div class="legend-item">
+      <div class="legend-swatch" style="background:${t.color}"></div>
+      <span>${t.name}</span>
+      <label class="toggle-switch" title="Toggle ${t.name} visibility">
+        <input type="checkbox" checked onchange="renderCoverage()">
+        <span class="slider"></span>
+      </label>
+    </div>`).join('');
+}
+
+async function addLocationType() {
+  const name = document.getElementById('new-type-name').value.trim();
+  const color = document.getElementById('new-type-color').value;
+  const radius = parseInt(document.getElementById('new-type-radius').value) || 60;
+  const unit = document.getElementById('new-type-unit').value;
+  if (!name) { alert('Please enter a type name.'); return; }
+  await fetch('/api/location-types', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ name, color, defaultRadius: radius, defaultRadiusUnit: unit }) });
+  document.getElementById('new-type-name').value = '';
+  document.getElementById('new-type-radius').value = '';
+  await loadAll();
+}
+
+async function deleteType(id) {
+  const t = locationTypes.find(t => t._id === id);
+  const count = locations.filter(l => l.typeId === id).length;
+  if (!confirm(`Delete type "${t.name}"? This will also remove ${count} location(s).`)) return;
+  await fetch(`/api/location-types/${id}`, { method: 'DELETE' });
+  if (selectedTypeId === id) selectedTypeId = null;
+  await loadAll();
+}
+
+function selectType(id) {
+  selectedTypeId = id;
+  renderTypeList();
+  renderLocationsList();
+}
+
+// ══════════════════════════════════
+// LOCATIONS LIST (right panel)
+// ══════════════════════════════════
+function renderLocationsList() {
+  const type = locationTypes.find(t => t._id === selectedTypeId);
+  if (!type) return;
+  const locs = locations.filter(l => l.typeId === selectedTypeId);
+  const main = document.getElementById('config-main');
+
+  main.innerHTML = `
+    <div class="config-main-header">
+      <div>
+        <h2><span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${type.color};margin-right:8px;"></span>${type.name}</h2>
+        <div class="sub">Default: ${type.defaultRadius} ${type.defaultRadiusUnit} &nbsp;|&nbsp; ${locs.length} location${locs.length !== 1 ? 's' : ''}</div>
+      </div>
+      <button class="btn btn-primary btn-sm" onclick="showAddLocationForm()">+ Add Location</button>
+    </div>
+    <div class="config-scroll">
+      <div id="add-loc-form-container"></div>
+      <div class="locations-grid" id="locations-grid">
+        ${locs.length === 0 ? `<div class="empty-state"><div class="icon">📍</div><p>No locations yet.<br>Add one above.</p></div>` :
+          locs.map(l => renderLocCard(l, type)).join('')}
+      </div>
+    </div>`;
+}
+
+function renderLocCard(l, type) {
+  const radius = l.customRadius ? `${l.customRadius} ${l.customRadiusUnit} (custom)` : `${type.defaultRadius} ${type.defaultRadiusUnit} (default)`;
+  return `<div class="loc-card" id="loc-${l._id}">
+    <div class="loc-dot" style="background:${type.color}"></div>
+    <div class="loc-info">
+      <div class="loc-name">${l.name}</div>
+      <div class="loc-addr">${l.address || `${l.lat?.toFixed(4)}, ${l.lng?.toFixed(4)}`}</div>
+      <div class="loc-radius">⏱ ${radius}</div>
+    </div>
+    <div class="loc-actions">
+      <button class="btn btn-ghost btn-sm" onclick="flyTo(${l.lat}, ${l.lng})" title="View on map">🗺</button>
+      <button class="btn btn-ghost btn-sm" onclick="editLocation('${l._id}')" title="Edit">✏</button>
+      <button class="btn btn-danger btn-sm" onclick="deleteLocation('${l._id}')" title="Delete">✕</button>
+    </div>
+  </div>`;
+}
+
+function flyTo(lat, lng) {
+  switchTab('map');
+  setTimeout(() => { map.flyTo([lat, lng], 11, { duration: 1.2 }); }, 100);
+}
+
+// ══════════════════════════════════
+// ADD / EDIT LOCATION FORM
+// ══════════════════════════════════
+function showAddLocationForm(prefill = null) {
+  const container = document.getElementById('add-loc-form-container');
+  container.innerHTML = `
+    <div class="add-loc-form" id="add-loc-form">
+      <div class="section-divider" style="margin-top:0">${prefill ? 'Edit Location' : 'New Location'}</div>
+      <div class="row">
+        <div>
+          <label class="field-label">Name *</label>
+          <input type="text" id="new-loc-name" placeholder="e.g. Mike S." value="${prefill?.name || ''}"/>
+        </div>
+      </div>
+      <div>
+        <label class="field-label">Address / Search</label>
+        <div class="pos-relative">
+          <input type="text" id="new-loc-addr" placeholder="Start typing an address..." value="${prefill?.address || ''}" oninput="geocodeSearch(this.value)" autocomplete="off"/>
+          <div class="geocode-results" id="geocode-results" style="display:none"></div>
+        </div>
+        <div class="hint" style="margin-top:4px">Or click on the map to drop a pin</div>
+      </div>
+      <div class="row">
+        <div>
+          <label class="field-label">Latitude</label>
+          <input type="number" id="new-loc-lat" step="0.000001" placeholder="41.1234" value="${prefill?.lat || ''}"/>
+        </div>
+        <div>
+          <label class="field-label">Longitude</label>
+          <input type="number" id="new-loc-lng" step="0.000001" placeholder="-81.5678" value="${prefill?.lng || ''}"/>
+        </div>
+      </div>
+      <div>
+        <label class="field-label">Custom Coverage Override <span class="hint">(leave blank to use type default)</span></label>
+        <div class="row">
+          <input type="number" id="new-loc-radius" placeholder="Leave blank for default" min="1" max="300" value="${prefill?.customRadius || ''}"/>
+          <select id="new-loc-unit" style="max-width:100px;">
+            <option value="minutes" ${prefill?.customRadiusUnit === 'minutes' ? 'selected' : ''}>minutes</option>
+            <option value="miles" ${prefill?.customRadiusUnit === 'miles' ? 'selected' : ''}>miles</option>
+          </select>
+        </div>
+      </div>
+      <div class="row">
+        <button class="btn btn-success" onclick="${prefill ? `saveEditLocation('${prefill._id}')` : 'saveNewLocation()'}">${prefill ? '💾 Save Changes' : '+ Add Location'}</button>
+        <button class="btn btn-ghost" onclick="closeAddForm()">Cancel</button>
+      </div>
+    </div>`;
+}
+
+function editLocation(id) {
+  const loc = locations.find(l => l._id === id);
+  if (!loc) return;
+  editingLocId = id;
+  showAddLocationForm(loc);
+  document.getElementById('add-loc-form-container').scrollIntoView({ behavior: 'smooth' });
+}
+
+function closeAddForm() {
+  const c = document.getElementById('add-loc-form-container');
+  if (c) c.innerHTML = '';
+  editingLocId = null;
+}
+
+async function saveNewLocation() {
+  const name = document.getElementById('new-loc-name').value.trim();
+  const address = document.getElementById('new-loc-addr').value.trim();
+  const lat = parseFloat(document.getElementById('new-loc-lat').value);
+  const lng = parseFloat(document.getElementById('new-loc-lng').value);
+  const customRadius = parseInt(document.getElementById('new-loc-radius').value) || null;
+  const customRadiusUnit = document.getElementById('new-loc-unit').value;
+
+  if (!name) { alert('Name is required.'); return; }
+  if (isNaN(lat) || isNaN(lng)) { alert('Valid coordinates are required. Search an address or click the map.'); return; }
+
+  await fetch('/api/locations', { method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ name, typeId: selectedTypeId, address, lat, lng, customRadius, customRadiusUnit }) });
+  closeAddForm();
+  await loadAll();
+}
+
+async function saveEditLocation(id) {
+  const name = document.getElementById('new-loc-name').value.trim();
+  const address = document.getElementById('new-loc-addr').value.trim();
+  const lat = parseFloat(document.getElementById('new-loc-lat').value);
+  const lng = parseFloat(document.getElementById('new-loc-lng').value);
+  const customRadius = parseInt(document.getElementById('new-loc-radius').value) || null;
+  const customRadiusUnit = document.getElementById('new-loc-unit').value;
+  if (!name || isNaN(lat) || isNaN(lng)) { alert('Name and coordinates required.'); return; }
+  await fetch(`/api/locations/${id}`, { method: 'PUT', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ name, address, lat, lng, customRadius, customRadiusUnit }) });
+  closeAddForm();
+  await loadAll();
+}
+
+async function deleteLocation(id) {
+  const loc = locations.find(l => l._id === id);
+  if (!confirm(`Delete "${loc.name}"?`)) return;
+  await fetch(`/api/locations/${id}`, { method: 'DELETE' });
+  await loadAll();
+}
+
+// ══════════════════════════════════
+// GEOCODING
+// ══════════════════════════════════
+function geocodeSearch(q) {
+  clearTimeout(geocodeTimer);
+  if (q.length < 3) { hideGeocodeResults(); return; }
+  geocodeTimer = setTimeout(async () => {
+    const results = await fetch(`/api/geocode?q=${encodeURIComponent(q)}`).then(r => r.json());
+    showGeocodeResults(results);
+  }, 400);
+}
+
+function showGeocodeResults(results) {
+  const el = document.getElementById('geocode-results');
+  if (!results.length) { el.style.display = 'none'; return; }
+  el.style.display = 'block';
+  el.innerHTML = results.map((r, i) => `<div class="geo-option" onclick="selectGeoResult(${i})">${r.display_name}</div>`).join('');
+  el._results = results;
+}
+
+function selectGeoResult(i) {
+  const el = document.getElementById('geocode-results');
+  const r = el._results[i];
+  document.getElementById('new-loc-addr').value = r.display_name;
+  document.getElementById('new-loc-lat').value = r.lat.toFixed(6);
+  document.getElementById('new-loc-lng').value = r.lng.toFixed(6);
+  hideGeocodeResults();
+}
+
+function hideGeocodeResults() {
+  const el = document.getElementById('geocode-results');
+  if (el) el.style.display = 'none';
+}
+
+document.addEventListener('click', (e) => {
+  if (!e.target.closest('.pos-relative')) hideGeocodeResults();
+});
+
+// ══════════════════════════════════
+// PINS
+// ══════════════════════════════════
+function renderPins() {
+  pinLayer.clearLayers();
+  locationTypes.forEach(type => {
+    const locs = locations.filter(l => l.typeId === type._id);
+    locs.forEach(l => {
+      const icon = L.divIcon({
+        className: '',
+        html: `<div style="width:14px;height:14px;border-radius:50%;background:${type.color};border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,0.5)"></div>`,
+        iconSize: [14, 14], iconAnchor: [7, 7]
+      });
+      const marker = L.marker([l.lat, l.lng], { icon })
+        .bindTooltip(`<b>${l.name}</b><br><span style="color:#888">${type.name}</span>`, { permanent: false, direction: 'top', offset: [0, -8] })
+        .addTo(pinLayer);
+    });
+  });
+}
+
+// ══════════════════════════════════
+// COVERAGE RENDERING
+// ══════════════════════════════════
+
+// Convert a circle iso or geojson iso → a turf polygon we can union
+function isoToTurfPolygon(iso) {
+  if (iso.type === 'isochrone' && iso.geojson) {
+    return iso.geojson; // already a GeoJSON Feature
+  } else {
+    // Approximate circle as a 64-point turf circle (radius in km)
+    return turf.circle([iso.lng, iso.lat], iso.radiusMeters / 1000, { steps: 64 });
+  }
+}
+
+// Union an array of turf polygons into one feature (or null)
+function unionAll(polygons) {
+  if (!polygons.length) return null;
+  let result = polygons[0];
+  for (let i = 1; i < polygons.length; i++) {
+    try { result = turf.union(result, polygons[i]); } catch(e) { /* skip bad geom */ }
+  }
+  return result;
+}
+
+async function renderCoverage() {
+  coverageLayer.clearLayers();
+  const mode = document.querySelector('input[name="cov-mode"]:checked')?.value || 'merged';
+  const showCombined = document.getElementById('show-combined')?.checked;
+
+  // Get visibility toggles per type (order matches locationTypes array)
+  const legend = document.getElementById('type-legend');
+  const toggles = legend.querySelectorAll('input[type=checkbox]');
+  const visibleTypeIds = new Set();
+  locationTypes.forEach((t, i) => {
+    if (toggles[i]?.checked) visibleTypeIds.add(t._id);
+  });
+
+  // Fetch isochrones for all visible locations
+  const isoPromises = locations.map(async l => {
+    const type = locationTypes.find(t => t._id === l.typeId);
+    if (!type || !visibleTypeIds.has(l.typeId)) return null;
+    let minutes;
+    if (l.customRadius) {
+      minutes = l.customRadiusUnit === 'miles' ? milesToMinutes(l.customRadius) : l.customRadius;
+    } else {
+      minutes = type.defaultRadiusUnit === 'miles' ? milesToMinutes(type.defaultRadius) : type.defaultRadius;
+    }
+    const iso = await fetch('/api/isochrone', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ lat: l.lat, lng: l.lng, minutes })
+    }).then(r => r.json());
+    return { loc: l, type, iso, minutes };
+  });
+
+  const isoResults = (await Promise.all(isoPromises)).filter(Boolean);
+  if (!isoResults.length) return;
+
+  // Group by type
+  const typeGroups = {};
+  isoResults.forEach(item => {
+    if (!typeGroups[item.type._id]) typeGroups[item.type._id] = { type: item.type, items: [] };
+    typeGroups[item.type._id].items.push(item);
+  });
+
+  if (showCombined) {
+    // Combined mode: union ALL visible shapes across ALL types → one single merged blob
+    const allPolygons = isoResults.map(item => isoToTurfPolygon(item.iso));
+    const combinedUnion = unionAll(allPolygons);
+    if (combinedUnion) {
+      L.geoJSON(combinedUnion, {
+        style: { color: '#a78bfa', fillColor: '#a78bfa', fillOpacity: 0.35, weight: 2.5, opacity: 0.85 }
+      }).addTo(coverageLayer);
+    }
+
+  } else if (mode === 'heat') {
+    // Heat map: draw each location individually — overlaps stack and darken naturally
+    Object.values(typeGroups).forEach(({ type, items }) => {
+      items.forEach(item => {
+        const poly = isoToTurfPolygon(item.iso);
+        L.geoJSON(poly, {
+          style: { color: type.color, fillColor: type.color, fillOpacity: 0.22, weight: 1.5, opacity: 0.5 }
+        }).addTo(coverageLayer);
+      });
+    });
+
+  } else {
+    // Merged: union all shapes per type → one clean blob per type, no internal overlaps
+    Object.values(typeGroups).forEach(({ type, items }) => {
+      const polygons = items.map(item => isoToTurfPolygon(item.iso));
+      const merged = unionAll(polygons);
+      if (merged) {
+        L.geoJSON(merged, {
+          style: { color: type.color, fillColor: type.color, fillOpacity: 0.28, weight: 2, opacity: 0.7 }
+        }).addTo(coverageLayer);
+      }
+    });
+  }
+}
+
+function drawCoverageShape(iso, color, fillOpacity, weight) {
+  // Legacy helper kept for any direct calls
+  if (iso.type === 'isochrone' && iso.geojson) {
+    L.geoJSON(iso.geojson, {
+      style: { color, fillColor: color, fillOpacity, weight: 1.5, opacity: 0.5 }
+    }).addTo(coverageLayer);
+  } else {
+    L.circle([iso.lat, iso.lng], {
+      radius: iso.radiusMeters,
+      color, fillColor: color, fillOpacity, weight: 1.5, opacity: 0.5
+    }).addTo(coverageLayer);
+  }
+}
+
+function milesToMinutes(miles) {
+  // ~50mph average driving
+  return Math.round((miles / 50) * 60);
+}
+
+// ══════════════════════════════════
+// BOOT
+// ══════════════════════════════════
+init();
+</script>
+</body>
+</html>
