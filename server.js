@@ -95,8 +95,10 @@ app.post('/api/locations', (req, res) => {
 });
 
 app.put('/api/locations/:id', (req, res) => {
-  const { name, address, lat, lng, customRadius, customRadiusUnit } = req.body;
-  db.locations.update({ _id: req.params.id }, { $set: { name, address, lat, lng, customRadius, customRadiusUnit } }, {}, (err) => {
+  const { name, address, lat, lng, customRadius, customRadiusUnit, typeId } = req.body;
+  const set = { name, address, lat, lng, customRadius, customRadiusUnit };
+  if (typeId) set.typeId = typeId; // allow reassigning a location to another type
+  db.locations.update({ _id: req.params.id }, { $set: set }, {}, (err) => {
     if (err) return res.status(500).json({ error: err.message });
     db.locations.findOne({ _id: req.params.id }, (err2, doc) => res.json(doc));
   });
