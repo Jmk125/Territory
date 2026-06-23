@@ -336,6 +336,13 @@
     .modal { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); width: 420px; max-width: 92vw; max-height: 90vh; overflow-y: auto; box-shadow: 0 20px 60px rgba(0,0,0,0.5); }
     .modal-header { padding: 14px 18px; border-bottom: 1px solid var(--border); font-weight: 700; font-size: 0.95rem; }
     .modal-body { padding: 18px; }
+    .gear-btn { background: none; border: none; color: var(--text2); cursor: pointer; font-size: 1rem; line-height: 1; padding: 2px 4px; border-radius: 6px; transition: color 0.1s, background 0.1s; }
+    .gear-btn:hover { color: var(--accent); background: var(--surface2); }
+    .ors-opt { display: flex; gap: 10px; align-items: flex-start; padding: 10px; border: 1px solid var(--border); border-radius: var(--radius); margin-bottom: 10px; cursor: pointer; }
+    .ors-opt:hover { border-color: var(--accent); }
+    .ors-opt input { margin-top: 3px; }
+    .ors-opt-title { font-weight: 700; font-size: 0.88rem; margin-bottom: 2px; }
+    .ors-opt code, .modal-body code { background: var(--surface2); padding: 1px 4px; border-radius: 4px; font-size: 0.85em; }
   </style>
 </head>
 <body>
@@ -423,6 +430,8 @@
       <label for="show-combined" style="cursor:pointer; font-size:0.8rem;">Show all types combined</label>
     </div>
 
+    <div id="approx-note" class="hint" style="display:none; margin-top:6px; color:var(--accent2);"></div>
+
     <div class="section-divider">Project Pins</div>
     <div class="pos-relative">
       <input type="text" id="pin-addr" placeholder="Search an address to add a pin..." oninput="pinGeocodeSearch(this.value)" autocomplete="off" />
@@ -448,6 +457,7 @@
   <div class="config-sidebar">
     <div class="config-sidebar-header">
       <span>Location Types</span>
+      <button class="gear-btn" title="Map data source (ORS)" onclick="openOrsSettings()">⚙</button>
     </div>
     <div class="type-list" id="type-list"></div>
     <div class="add-type-form">
@@ -498,6 +508,9 @@ let selectedTypeId = null;
 let geocodeTimer = null;
 let hasOrsKey = false;
 let editingLocId = null;
+let orsSettings = null;        // last-loaded ORS source settings (from server)
+let orsActive = false;         // true when isochrones are available (key or self-host)
+let orsMaxMinutes = 60;        // drive times beyond this are approximated
 
 // Temporary project pins (client-side only, persisted in localStorage)
 let projectPins = [];
@@ -521,12 +534,7 @@ let coverageToken = 0;
 async function init() {
   const cfg = await fetch('/api/config').then(r => r.json());
   hasOrsKey = cfg.hasOrsKey;
-
-  const badge = document.getElementById('ors-badge');
-  if (hasOrsKey) {
-    badge.textContent = '🟢 Isochrone Mode';
-    badge.className = 'badge-ors active';
-  }
+  await refreshOrsStatus();
 
   // Apply splash color theme as CSS variables on the splash element
   if (cfg.splashColor) {
@@ -660,6 +668,127 @@ function initMap() {
 
 function refreshMap() {
   loadAll();
+}
+
+// ══════════════════════════════════
+// ORS DATA SOURCE (Configure → ⚙)
+// ══════════════════════════════════
+// Pull the active source settings from the server and reflect them in the
+// header badge + the approximation threshold used when drawing coverage.
+async function refreshOrsStatus() {
+  try {
+    const s = await fetch('/api/ors-settings').then(r => r.json());
+    orsSettings = s;
+    orsActive = !!s.orsActive;
+    hasOrsKey = !!s.hasApiKey;
+    orsMaxMinutes = s.effectiveMaxMinutes || 60;
+  } catch (e) { /* leave previous values */ }
+  updateOrsBadge();
+}
+
+function updateOrsBadge() {
+  const badge = document.getElementById('ors-badge');
+  if (!badge) return;
+  if (orsActive) {
+    badge.textContent = orsSettings && orsSettings.mode === 'selfhosted' ? '🟢 Self-Hosted ORS' : '🟢 Isochrone Mode';
+    badge.className = 'badge-ors active';
+  } else {
+    badge.textContent = '⚪ Circle Mode';
+    badge.className = 'badge-ors fallback';
+  }
+}
+
+// Open the source picker (public API vs. self-hosted instance).
+function openOrsSettings() {
+  const s = orsSettings || { mode: 'api', selfHostedUrl: '', maxRangeMinutes: 60, hasApiKey: false, defaultApiMaxMinutes: 60 };
+  const self = s.mode === 'selfhosted';
+  const limitVal = self ? s.maxRangeMinutes : 90;
+  openModal('⚙ Map Data Source', `
+    <div class="hint" style="margin-bottom:14px">Choose how drive-time isochrones are computed.</div>
+
+    <label class="ors-opt">
+      <input type="radio" name="ors-mode" value="api" ${self ? '' : 'checked'} onchange="orsModeChanged()">
+      <div>
+        <div class="ors-opt-title">Public ORS API</div>
+        <div class="hint">Uses the API key in your <code>.env</code>. Capped at ${s.defaultApiMaxMinutes} min — longer ranges are approximated.</div>
+        <div class="hint" style="margin-top:3px">${s.hasApiKey ? '🟢 API key detected in .env' : '🔴 No API key found in .env'}</div>
+      </div>
+    </label>
+
+    <label class="ors-opt">
+      <input type="radio" name="ors-mode" value="selfhosted" ${self ? 'checked' : ''} onchange="orsModeChanged()">
+      <div>
+        <div class="ors-opt-title">Self-hosted ORS server</div>
+        <div class="hint">Point at your own ORS instance on the network.</div>
+      </div>
+    </label>
+
+    <div id="ors-self-fields" style="display:${self ? 'block' : 'none'}; margin-top:6px; padding-left:26px;">
+      <label class="field-label">Server address</label>
+      <div class="row" style="gap:6px">
+        <input type="text" id="ors-url" placeholder="192.168.1.50:8082" value="${escapeHtml(s.selfHostedUrl || '')}" style="flex:1" onchange="testOrsConnection()">
+        <button class="btn btn-ghost btn-sm" type="button" onclick="testOrsConnection()">Test</button>
+      </div>
+      <div class="hint" style="margin-top:4px">IP/host (with port), or a full <code>http://host:8082/ors</code> URL.</div>
+      <div id="ors-test-status" class="hint" style="margin-top:6px"></div>
+
+      <label class="field-label" style="margin-top:12px">Max drive-time limit (minutes)</label>
+      <input type="number" id="ors-max" min="1" max="600" value="${limitVal}" style="width:100%">
+      <div class="hint" style="margin-top:4px">Match your ORS <code>maximum_range_time</code>. Ranges above this are approximated.</div>
+    </div>
+
+    <div style="margin-top:18px; display:flex; gap:8px; justify-content:flex-end">
+      <button class="btn btn-ghost" type="button" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-success" type="button" onclick="saveOrsSettings()">Save</button>
+    </div>
+  `);
+  if (self && s.selfHostedUrl) testOrsConnection();
+}
+
+function orsModeChanged() {
+  const self = document.querySelector('input[name="ors-mode"]:checked')?.value === 'selfhosted';
+  const fields = document.getElementById('ors-self-fields');
+  if (fields) fields.style.display = self ? 'block' : 'none';
+}
+
+async function testOrsConnection() {
+  const url = document.getElementById('ors-url')?.value;
+  const status = document.getElementById('ors-test-status');
+  if (!status) return false;
+  if (!url || !url.trim()) { status.textContent = 'Enter a server address.'; status.style.color = 'var(--text2)'; return false; }
+  status.textContent = '⏳ Testing connection…'; status.style.color = 'var(--text2)';
+  try {
+    const r = await fetch('/api/ors-test', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url })
+    }).then(r => r.json());
+    status.textContent = (r.ok ? '🟢 ' : '🔴 ') + (r.message || (r.ok ? 'Connected' : 'Failed'));
+    status.style.color = r.ok ? 'var(--success)' : 'var(--danger)';
+    return r.ok;
+  } catch (e) {
+    status.textContent = '🔴 Test failed: ' + e.message; status.style.color = 'var(--danger)';
+    return false;
+  }
+}
+
+async function saveOrsSettings() {
+  const mode = document.querySelector('input[name="ors-mode"]:checked')?.value || 'api';
+  const selfHostedUrl = document.getElementById('ors-url')?.value || '';
+  const maxRangeMinutes = parseInt(document.getElementById('ors-max')?.value, 10) || 60;
+  if (mode === 'selfhosted' && !selfHostedUrl.trim()) {
+    const status = document.getElementById('ors-test-status');
+    if (status) { status.textContent = '🔴 Enter a server address first.'; status.style.color = 'var(--danger)'; }
+    return;
+  }
+  await fetch('/api/ors-settings', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mode, selfHostedUrl, maxRangeMinutes })
+  });
+  closeModal();
+  locPolyCache = {};            // cached shapes depend on the source + limit
+  await refreshOrsStatus();
+  renderTypeList();             // refresh "approx beyond N min" labels
+  refreshMap();
 }
 
 // ══════════════════════════════════
@@ -905,12 +1034,14 @@ function renderLocationsList() {
 
 function renderLocCard(l, type) {
   const radius = l.customRadius ? `${l.customRadius} ${l.customRadiusUnit} (custom)` : `${type.defaultRadius} ${type.defaultRadiusUnit} (default)`;
+  const approx = orsActive && locationMinutes(l) > orsMaxMinutes
+    ? `<span class="hint" style="color:var(--accent2)"> · ≈ approx beyond ${orsMaxMinutes} min</span>` : '';
   return `<div class="loc-card" id="loc-${l._id}">
     <div class="loc-dot" style="background:${type.color}"></div>
     <div class="loc-info">
       <div class="loc-name">${l.name}</div>
       <div class="loc-addr">${l.address || `${l.lat?.toFixed(4)}, ${l.lng?.toFixed(4)}`}</div>
-      <div class="loc-radius">⏱ ${radius}</div>
+      <div class="loc-radius">⏱ ${radius}${approx}</div>
     </div>
     <div class="loc-actions">
       <button class="btn btn-ghost btn-sm" onclick="flyTo(${l.lat}, ${l.lng})" title="View on map">🗺</button>
@@ -1399,8 +1530,17 @@ async function confirmMakePermanent() {
 // Convert a circle iso or geojson iso → a turf polygon we can union
 function isoToTurfPolygon(iso) {
   if (iso.type === 'isochrone' && iso.geojson) {
-    // Real ORS isochrone for the full requested range — draw it as-is.
-    return iso.geojson; // a GeoJSON Feature
+    let poly = iso.geojson; // a GeoJSON Feature
+    // Drive times beyond the source's range cap come back as the capped
+    // isochrone plus the leftover minutes — pad the shape outward by that road
+    // distance so it stays route-aware instead of collapsing to a plain circle.
+    if (iso.extendMinutes > 0) {
+      try {
+        const km = (iso.extendMinutes / 60) * 50; // ~50mph
+        poly = turf.buffer(poly, km, { units: 'kilometers' }) || poly;
+      } catch (e) { /* keep un-buffered shape on failure */ }
+    }
+    return poly;
   } else {
     // Approximate circle as a 64-point turf circle (radius in km)
     return turf.circle([iso.lng, iso.lat], iso.radiusMeters / 1000, { steps: 64 });
@@ -1440,6 +1580,16 @@ function unionAll(polygons) {
   return result;
 }
 
+// Show a note when any drawn coverage exceeds the source's range cap (and is
+// therefore an outward-padded approximation rather than a true isochrone).
+function updateApproxNote(items) {
+  const note = document.getElementById('approx-note');
+  if (!note) return;
+  const any = orsActive && items.some(it => locationMinutes(it.loc) > orsMaxMinutes);
+  note.style.display = any ? 'block' : 'none';
+  if (any) note.textContent = `≈ Coverage beyond ${orsMaxMinutes} min is approximate`;
+}
+
 async function renderCoverage() {
   // Each render gets a token; if a newer render starts while we're awaiting
   // isochrones, this stale one bails before drawing (otherwise slow isochrone
@@ -1460,6 +1610,7 @@ async function renderCoverage() {
   const isoResults = built.filter(Boolean);
   // A newer render superseded us while awaiting — discard these stale results
   if (myToken !== coverageToken) return;
+  updateApproxNote(isoResults);
   if (!isoResults.length) return;
 
   // Group by type

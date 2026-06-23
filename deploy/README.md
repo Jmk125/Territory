@@ -76,21 +76,27 @@ sudo systemctl restart hammond-territory
 | Live logs         | `journalctl -u hammond-territory -f`             |
 | Disable autostart | `sudo systemctl disable hammond-territory`       |
 
-## Self-hosted OpenRouteService (drive-time isochrones)
+## Drive-time isochrones (OpenRouteService)
 
-The app draws real drive-time isochrones by calling an ORS instance. Point it
-at your self-hosted ORS with `ORS_BASE_URL` (include the `/ors` path, no
-trailing slash) and set `ORS_API_KEY` to any non-empty value — self-hosted ORS
-ignores auth. Example `.env`:
+The app draws drive-time isochrones by calling an ORS instance. You pick the
+data source at runtime in the app: **Configure tab → ⚙ gear → Map Data Source**.
 
-```
-ORS_BASE_URL=http://localhost:8082/ors
-ORS_API_KEY=local
-```
+- **Public ORS API** — uses the `ORS_API_KEY` from `.env`. Capped at 60 min;
+  longer ranges are approximated (the 60-min shape is padded outward and the
+  coverage is labelled "approx").
+- **Self-hosted ORS server** — enter your instance's address (e.g.
+  `192.168.1.50:8082`, or a full `http://host:8082/ors` URL) and a drive-time
+  limit that matches its config. The **Test** button checks the connection
+  before you commit. Set `ORS_API_KEY` to any non-empty value — self-hosted ORS
+  ignores auth.
 
-The app sends the **full requested drive time** straight to ORS — no cap and no
-circle "approximation". The only range limit that applies is the one your ORS
-instance enforces.
+The choice is saved to `data/settings.db` and persists across restarts. On a
+fresh install the seed defaults come from `ORS_BASE_URL` / `ORS_MAX_RANGE_SEC`
+in `.env` (see `.env.example`), so an existing env-based setup keeps working
+until you change it from the gear.
+
+Ranges above the active source's limit are approximated; everything at or below
+it is a real ORS isochrone.
 
 ### Isochrones beyond 60 minutes return a circle?
 
