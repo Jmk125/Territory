@@ -13,7 +13,9 @@ const db = {
   locations: new Datastore({ filename: path.join(__dirname, 'data/locations.db'), autoload: true }),
   // Persistent cache of computed isochrones so we only call the ORS key once
   // per unique coordinate+range instead of on every map render.
-  isochroneCache: new Datastore({ filename: path.join(__dirname, 'data/isochroneCache.db'), autoload: true })
+  isochroneCache: new Datastore({ filename: path.join(__dirname, 'data/isochroneCache.db'), autoload: true }),
+  // Cache of driving durations (source→destination) to avoid repeat key calls.
+  travelCache: new Datastore({ filename: path.join(__dirname, 'data/travelCache.db'), autoload: true })
 };
 
 app.use(express.json());
@@ -165,6 +167,75 @@ app.post('/api/isochrone', async (req, res) => {
   } catch (e) {
     res.json({ type: 'circle', lat, lng, radiusMeters: minutesToMeters(minutes) });
   }
+});
+
+// ─── Travel times (driving duration from each source → one destination) ──
+// Uses the ORS Matrix API: one key call covers every source at once. Falls
+// back to a straight-line estimate when no key is configured. Real (routed)
+// results are cached per source→destination pair; estimates are never cached
+// so they upgrade automatically once a key is added.
+function travelKey(f, t) {
+  return `${Number(f.lat).toFixed(5)},${Number(f.lng).toFixed(5)}->${Number(t.lat).toFixed(5)},${Number(t.lng).toFixed(5)}`;
+}
+
+function haversineMeters(a, b) {
+  const R = 6371000, toRad = x => x * Math.PI / 180;
+  const dLat = toRad(b.lat - a.lat), dLng = toRad(b.lng - a.lng);
+  const s = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(a.lat)) * Math.cos(toRad(b.lat)) * Math.sin(dLng / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(s));
+}
+
+app.post('/api/travel-times', async (req, res) => {
+  const { from, to } = req.body;
+  if (!Array.isArray(from) || !to) return res.status(400).json({ error: 'from[] and to required' });
+  const apiKey = process.env.ORS_API_KEY;
+
+  const results = new Array(from.length).fill(null);
+  const misses = [];
+
+  // Serve cached pairs first
+  await Promise.all(from.map((f, i) => new Promise(resolve => {
+    db.travelCache.findOne({ key: travelKey(f, to) }, (err, doc) => {
+      if (doc && typeof doc.seconds === 'number') results[i] = { seconds: doc.seconds, estimated: false };
+      else misses.push(i);
+      resolve();
+    });
+  })));
+
+  if (misses.length) {
+    const computed = {};
+    if (apiKey && apiKey.trim()) {
+      try {
+        const locations = misses.map(i => [from[i].lng, from[i].lat]);
+        locations.push([to.lng, to.lat]);
+        const r = await fetch('https://api.openrouteservice.org/v2/matrix/driving-car', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': apiKey },
+          body: JSON.stringify({ locations, sources: misses.map((_, k) => k), destinations: [misses.length], metrics: ['duration'] })
+        });
+        const data = await r.json();
+        if (data && data.durations) {
+          misses.forEach((idx, k) => {
+            const sec = data.durations[k] ? data.durations[k][0] : null;
+            if (sec != null) computed[idx] = { seconds: Math.round(sec), estimated: false };
+          });
+        }
+      } catch (e) { /* fall through to estimate */ }
+    }
+    misses.forEach(idx => {
+      if (!computed[idx]) {
+        const meters = haversineMeters(from[idx], to);
+        computed[idx] = { seconds: Math.round(meters / 1340 * 60), estimated: true };
+      }
+      results[idx] = computed[idx];
+      if (!computed[idx].estimated) {
+        const key = travelKey(from[idx], to);
+        db.travelCache.update({ key }, { key, seconds: computed[idx].seconds, createdAt: Date.now() }, { upsert: true });
+      }
+    });
+  }
+
+  res.json({ times: results });
 });
 
 // average driving speed ~50mph = ~1340 meters/minute
