@@ -945,6 +945,13 @@ function showAddLocationForm(prefill = null) {
           <input type="text" id="new-loc-name" placeholder="e.g. Mike S." value="${prefill?.name || ''}"/>
         </div>
       </div>
+      ${prefill ? `
+      <div>
+        <label class="field-label">Location Type <span class="hint">(move to another type)</span></label>
+        <select id="edit-loc-type">
+          ${locationTypes.map(t => `<option value="${t._id}" ${t._id === prefill.typeId ? 'selected' : ''}>${escapeHtml(t.name)}</option>`).join('')}
+        </select>
+      </div>` : ''}
       <div>
         <label class="field-label">Address / Search</label>
         <div class="pos-relative">
@@ -1018,10 +1025,13 @@ async function saveEditLocation(id) {
   const lng = parseFloat(document.getElementById('new-loc-lng').value);
   const customRadius = parseInt(document.getElementById('new-loc-radius').value) || null;
   const customRadiusUnit = document.getElementById('new-loc-unit').value;
+  const typeId = document.getElementById('edit-loc-type')?.value;
   if (!name || isNaN(lat) || isNaN(lng)) { alert('Name and coordinates required.'); return; }
   await fetch(`/api/locations/${id}`, { method: 'PUT', headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({ name, address, lat, lng, customRadius, customRadiusUnit }) });
+    body: JSON.stringify({ name, address, lat, lng, customRadius, customRadiusUnit, typeId }) });
   closeAddForm();
+  // The reassigned location simply drops out of the currently-selected type's
+  // list; the sidebar counts update on reload.
   await loadAll();
 }
 
