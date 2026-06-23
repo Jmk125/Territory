@@ -308,7 +308,6 @@
     .ppin-actions { display: flex; gap: 2px; flex-shrink: 0; }
     .ppin-actions button { background: none; border: none; color: var(--text2); cursor: pointer; font-size: 0.85rem; line-height: 1; padding: 2px 3px; border-radius: 4px; }
     .ppin-actions button:hover { color: var(--text); background: var(--bg); }
-    #drop-pin-btn.btn-primary { color: #fff; }
 
     /* ── MODAL ── */
     .modal-overlay { position: fixed; inset: 0; z-index: 5000; background: rgba(0,0,0,0.6); display: flex; align-items: center; justify-content: center; }
@@ -398,7 +397,10 @@
     </div>
 
     <div class="section-divider">Project Pins</div>
-    <button class="btn btn-ghost btn-sm" id="drop-pin-btn" onclick="togglePinDrop()">📌 Drop Pin: Off</button>
+    <div class="pos-relative">
+      <input type="text" id="pin-addr" placeholder="Search an address to add a pin..." oninput="pinGeocodeSearch(this.value)" autocomplete="off" />
+      <div class="geocode-results" id="pin-geo-results" style="display:none"></div>
+    </div>
     <div id="project-pin-list" class="project-pin-list"></div>
 
     <button class="btn btn-ghost btn-sm" onclick="refreshMap()" style="margin-top:4px;">↺ Refresh Coverage</button>
@@ -408,7 +410,7 @@
 <!-- MAKE-PERMANENT MODAL -->
 <div id="modal-overlay" class="modal-overlay" style="display:none;">
   <div class="modal">
-    <div class="modal-header">⭐ Make Pin Permanent</div>
+    <div class="modal-header" id="modal-title"></div>
     <div class="modal-body" id="modal-body"></div>
   </div>
 </div>
@@ -469,7 +471,6 @@ let editingLocId = null;
 
 // Temporary project pins (client-side only, persisted in localStorage)
 let projectPins = [];
-let pinDropMode = false;
 let makePermanentPinId = null;
 
 // Per-type display toggles (in-memory) and per-location exclusions (persisted).
@@ -541,11 +542,6 @@ function initMap() {
   projectPinLayer = L.layerGroup().addTo(map);
 
   map.on('click', (e) => {
-    // On the Map tab with pin-drop active → drop a temporary project pin
-    if (pinDropMode && document.getElementById('panel-map').classList.contains('active')) {
-      addProjectPin(e.latlng.lat, e.latlng.lng);
-      return;
-    }
     // On the Configure tab → set the new-location coords
     const latEl = document.getElementById('new-loc-lat');
     const lngEl = document.getElementById('new-loc-lng');
@@ -893,7 +889,11 @@ function hideGeocodeResults() {
 }
 
 document.addEventListener('click', (e) => {
-  if (!e.target.closest('.pos-relative')) hideGeocodeResults();
+  if (!e.target.closest('.pos-relative')) {
+    hideGeocodeResults();
+    const pg = document.getElementById('pin-geo-results');
+    if (pg) pg.style.display = 'none';
+  }
 });
 
 // ══════════════════════════════════
@@ -930,18 +930,32 @@ function saveProjectPins() {
   localStorage.setItem('projectPins', JSON.stringify(projectPins));
 }
 
-function togglePinDrop() {
-  pinDropMode = !pinDropMode;
-  const btn = document.getElementById('drop-pin-btn');
-  btn.textContent = `📌 Drop Pin: ${pinDropMode ? 'On' : 'Off'}`;
-  btn.classList.toggle('btn-primary', pinDropMode);
-  btn.classList.toggle('btn-ghost', !pinDropMode);
-  if (map) map.getContainer().style.cursor = pinDropMode ? 'crosshair' : '';
+// Add a pin by geocoding an address typed into the map controls
+function pinGeocodeSearch(q) {
+  clearTimeout(geocodeTimer);
+  const el = document.getElementById('pin-geo-results');
+  if (q.length < 3) { el.style.display = 'none'; return; }
+  geocodeTimer = setTimeout(async () => {
+    const results = await fetch(`/api/geocode?q=${encodeURIComponent(q)}`).then(r => r.json());
+    if (!results.length) { el.style.display = 'none'; return; }
+    el.style.display = 'block';
+    el.innerHTML = results.map((r, i) => `<div class="geo-option" onclick="selectPinGeoResult(${i})">${r.display_name}</div>`).join('');
+    el._results = results;
+  }, 400);
 }
 
-function addProjectPin(lat, lng, name) {
+function selectPinGeoResult(i) {
+  const el = document.getElementById('pin-geo-results');
+  const r = el._results[i];
+  addProjectPin(r.lat, r.lng, r.display_name.split(',')[0], r.display_name);
+  el.style.display = 'none';
+  document.getElementById('pin-addr').value = '';
+  map.flyTo([r.lat, r.lng], 11, { duration: 1 });
+}
+
+function addProjectPin(lat, lng, name, address) {
   const id = 'p' + Date.now() + Math.random().toString(36).slice(2, 6);
-  projectPins.push({ id, name: name || `Project ${projectPins.length + 1}`, lat, lng });
+  projectPins.push({ id, name: name || `Project ${projectPins.length + 1}`, lat, lng, address: address || '' });
   saveProjectPins();
   renderProjectPins();
   renderProjectPinList();
@@ -990,13 +1004,12 @@ function renderProjectPins() {
   });
 }
 
-// Click a project pin → which territories' coverage contain this point?
+// Click a project pin → modal listing covering territories, sorted by drive time
 async function showPinTerritories(pin) {
-  const popup = L.popup({ maxWidth: 280 })
-    .setLatLng([pin.lat, pin.lng])
-    .setContent(`<div style="font-weight:700">📌 ${pin.name}</div><div style="color:#888;font-size:0.8rem;margin-top:4px">Checking coverage…</div>`)
-    .openOn(map);
+  const subtitle = pin.address ? `<div class="hint" style="margin-bottom:10px">${escapeHtml(pin.address)}</div>` : '';
+  openModal(`📌 ${escapeHtml(pin.name)}`, `${subtitle}<div class="hint">Finding covering territories…</div>`);
 
+  // Which territories' coverage areas contain this point?
   const results = await Promise.all(locations.map(async l => {
     if (excludedLocIds.has(l._id)) return null;         // excluded = unavailable
     const type = locationTypes.find(t => t._id === l.typeId);
@@ -1010,25 +1023,64 @@ async function showPinTerritories(pin) {
   }));
   const matches = results.filter(Boolean);
 
-  let html = `<div style="font-weight:700;margin-bottom:6px">📌 ${pin.name}</div>`;
+  const actions = `<div class="row" style="margin-top:18px;gap:8px">
+      <button class="btn btn-success btn-sm" onclick="openMakePermanent('${pin.id}')">⭐ Make Permanent</button>
+      <button class="btn btn-ghost btn-sm" onclick="closeModal()">Close</button>
+    </div>`;
+
   if (!matches.length) {
-    html += `<div style="color:#888;font-size:0.82rem">Not inside any territory's coverage area.</div>`;
-  } else {
-    html += `<div style="color:#888;font-size:0.78rem;margin-bottom:5px">Covered by ${matches.length} territor${matches.length > 1 ? 'ies' : 'y'}:</div>`;
-    html += matches.map(m => `
-      <div style="display:flex;align-items:center;gap:6px;font-size:0.83rem;padding:2px 0">
-        <span style="width:9px;height:9px;border-radius:50%;background:${m.type.color};display:inline-block;flex-shrink:0"></span>
-        <b>${m.loc.name}</b><span style="color:#888">· ${m.type.name}</span>
-      </div>`).join('');
+    openModal(`📌 ${escapeHtml(pin.name)}`, `${subtitle}<div style="color:var(--text2);font-size:0.88rem">This pin is not inside any territory's coverage area.</div>${actions}`);
+    return;
   }
-  popup.setContent(html);
+
+  // Driving time from each covering territory → the pin, then sort nearest-first
+  const tt = await fetch('/api/travel-times', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ from: matches.map(m => ({ lat: m.loc.lat, lng: m.loc.lng })), to: { lat: pin.lat, lng: pin.lng } })
+  }).then(r => r.json()).catch(() => ({ times: [] }));
+
+  const rows = matches.map((m, i) => ({ ...m, seconds: tt.times?.[i]?.seconds ?? null, estimated: tt.times?.[i]?.estimated }));
+  rows.sort((a, b) => (a.seconds ?? Infinity) - (b.seconds ?? Infinity));
+  const anyEstimated = rows.some(r => r.estimated);
+
+  const list = rows.map(r => `
+    <div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--border)">
+      <span style="width:10px;height:10px;border-radius:50%;background:${r.type.color};flex-shrink:0"></span>
+      <div style="flex:1;min-width:0">
+        <div style="font-weight:600">${escapeHtml(r.loc.name)}</div>
+        <div style="font-size:0.75rem;color:var(--text2)">${escapeHtml(r.type.name)}</div>
+      </div>
+      <div style="font-weight:700;color:var(--accent);white-space:nowrap">${r.estimated ? '~' : ''}${fmtDuration(r.seconds)}</div>
+    </div>`).join('');
+
+  const note = anyEstimated ? `<div class="hint" style="margin-top:8px">~ straight-line estimate (add an ORS key for real drive times)</div>` : '';
+  openModal(`📌 ${escapeHtml(pin.name)}`,
+    `${subtitle}<div class="hint" style="margin-bottom:6px">Covered by ${rows.length} territor${rows.length > 1 ? 'ies' : 'y'} · nearest first</div>${list}${note}${actions}`);
+}
+
+function openModal(title, html) {
+  document.getElementById('modal-title').innerHTML = title;
+  document.getElementById('modal-body').innerHTML = html;
+  document.getElementById('modal-overlay').style.display = 'flex';
+}
+
+function fmtDuration(sec) {
+  if (sec == null) return '—';
+  const m = Math.max(1, Math.round(sec / 60));
+  if (m < 60) return `${m} min`;
+  const h = Math.floor(m / 60), mm = m % 60;
+  return mm ? `${h} hr ${mm} min` : `${h} hr`;
+}
+
+function escapeHtml(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
 function renderProjectPinList() {
   const el = document.getElementById('project-pin-list');
   if (!el) return;
   if (!projectPins.length) {
-    el.innerHTML = '<span class="hint">No pins. Turn on "Drop Pin" then click the map.</span>';
+    el.innerHTML = '<span class="hint">No pins. Search an address above to add one.</span>';
     return;
   }
   el.innerHTML = projectPins.map(p => `
@@ -1095,6 +1147,7 @@ function openMakePermanent(id) {
       <button class="btn btn-success" onclick="confirmMakePermanent()">⭐ Make Permanent</button>
       <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
     </div>`;
+  document.getElementById('modal-title').innerHTML = '⭐ Make Pin Permanent';
   document.getElementById('modal-overlay').style.display = 'flex';
   updateMakePermanentMode();
 }
