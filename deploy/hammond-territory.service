@@ -1,0 +1,20 @@
+[Unit]
+Description=Hammond Territory coverage mapping tool
+Documentation=https://github.com/Jmk125/Territory
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/hammond-territory
+# Verify the node path on your Pi with: which node
+# (common values: /usr/bin/node, /usr/local/bin/node, or an nvm path)
+ExecStart=/usr/bin/node /home/pi/hammond-territory/server.js
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=yes
+# The app reads its .env (ORS_API_KEY, PORT, …) via dotenv from WorkingDirectory.
+
+[Install]
+WantedBy=multi-user.target
