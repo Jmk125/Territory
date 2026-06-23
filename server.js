@@ -1,12 +1,12 @@
-require('dotenv').config();
+require('dotenv').config({ path: require('path').join(__dirname, '.env') });
 const express = require('express');
 const Datastore = require('nedb');
 const fetch = require('node-fetch');
 const path = require('path');
-const turf = require('@turf/turf');
+const turfBuffer = require('@turf/buffer');
 
 const app = express();
-const PORT = process.env.PORT || 3080;
+const PORT = Number.parseInt(process.env.PORT, 10) || 3080;
 
 // Databases
 const db = {
@@ -205,7 +205,7 @@ app.post('/api/isochrone', async (req, res) => {
     if (extendMinutes > 0) {
       try {
         const km = (extendMinutes / 60) * 50; // ~50mph
-        const buffered = turf.buffer(feature, km, { units: 'kilometers' });
+        const buffered = turfBuffer(feature, km, { units: 'kilometers' });
         if (buffered) { finalGeo = buffered; remaining = 0; }
       } catch (e) { /* leave remaining for client to buffer */ }
     }
@@ -290,8 +290,15 @@ function minutesToMeters(minutes) {
   return Math.round(minutes * 1340);
 }
 
-app.listen(PORT, '0.0.0.0', () => {
+const server = app.listen(PORT, '0.0.0.0', () => {
   console.log(`\n🚨 PROJECT SECRET WISHES 🚨`);
   console.log(`   Server running on port ${PORT}`);
   console.log(`   http://localhost:${PORT}\n`);
+});
+
+server.on('error', (err) => {
+  if (err.code === 'EADDRINUSE') {
+    console.error(`Port ${PORT} is already in use. Stop the other process or set PORT in ${path.join(__dirname, '.env')}.`);
+  }
+  throw err;
 });
