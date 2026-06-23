@@ -399,6 +399,8 @@
       <label for="show-combined" style="cursor:pointer; font-size:0.8rem;">Show all types combined</label>
     </div>
 
+    <div id="approx-note" class="hint" style="display:none; margin-top:6px; color:var(--accent2);"></div>
+
     <div class="section-divider">Project Pins</div>
     <div class="pos-relative">
       <input type="text" id="pin-addr" placeholder="Search an address to add a pin..." oninput="pinGeocodeSearch(this.value)" autocomplete="off" />
@@ -471,6 +473,7 @@ let selectedTypeId = null;
 let geocodeTimer = null;
 let hasOrsKey = false;
 let editingLocId = null;
+let orsMaxMinutes = 60; // drive times beyond this are approximated (from server)
 
 // Temporary project pins (client-side only, persisted in localStorage)
 let projectPins = [];
@@ -494,6 +497,7 @@ let coverageToken = 0;
 async function init() {
   const cfg = await fetch('/api/config').then(r => r.json());
   hasOrsKey = cfg.hasOrsKey;
+  if (cfg.orsMaxMinutes) orsMaxMinutes = cfg.orsMaxMinutes;
 
   const badge = document.getElementById('ors-badge');
   if (hasOrsKey) {
@@ -514,9 +518,19 @@ async function init() {
   }
 
   if (cfg.showSplash) {
+    // Keep the splash animation smooth: defer the heavy map + coverage build
+    // (Leaflet init, isochrone fetches, turf union/buffer) until the user
+    // enters, so it doesn't contend with the splash on the main thread.
     document.getElementById('splash').style.display = 'flex';
+  } else {
+    await boot();
   }
+}
 
+let booted = false;
+async function boot() {
+  if (booted) return;
+  booted = true;
   initMap();
   loadProjectPins();
   loadExcluded();
@@ -528,6 +542,7 @@ function dismissSplash() {
   splash.style.transition = 'opacity 0.5s';
   splash.style.opacity = '0';
   setTimeout(() => splash.style.display = 'none', 500);
+  boot(); // build the app now (no-op if already booted)
 }
 
 // ══════════════════════════════════
@@ -783,12 +798,14 @@ function renderLocationsList() {
 
 function renderLocCard(l, type) {
   const radius = l.customRadius ? `${l.customRadius} ${l.customRadiusUnit} (custom)` : `${type.defaultRadius} ${type.defaultRadiusUnit} (default)`;
+  const approx = hasOrsKey && locationMinutes(l) > orsMaxMinutes
+    ? `<span class="hint" style="color:var(--accent2)"> · ≈ approx beyond ${orsMaxMinutes} min</span>` : '';
   return `<div class="loc-card" id="loc-${l._id}">
     <div class="loc-dot" style="background:${type.color}"></div>
     <div class="loc-info">
       <div class="loc-name">${l.name}</div>
       <div class="loc-addr">${l.address || `${l.lat?.toFixed(4)}, ${l.lng?.toFixed(4)}`}</div>
-      <div class="loc-radius">⏱ ${radius}</div>
+      <div class="loc-radius">⏱ ${radius}${approx}</div>
     </div>
     <div class="loc-actions">
       <button class="btn btn-ghost btn-sm" onclick="flyTo(${l.lat}, ${l.lng})" title="View on map">🗺</button>
@@ -1317,6 +1334,16 @@ function unionAll(polygons) {
   return result;
 }
 
+// Show a note when any drawn coverage exceeds the ORS isochrone cap (and is
+// therefore an outward-padded approximation rather than a true isochrone).
+function updateApproxNote(items) {
+  const note = document.getElementById('approx-note');
+  if (!note) return;
+  const any = hasOrsKey && items.some(it => locationMinutes(it.loc) > orsMaxMinutes);
+  note.style.display = any ? 'block' : 'none';
+  if (any) note.textContent = `≈ Coverage beyond ${orsMaxMinutes} min is approximate`;
+}
+
 async function renderCoverage() {
   // Each render gets a token; if a newer render starts while we're awaiting
   // isochrones, this stale one bails before drawing (otherwise slow isochrone
@@ -1341,6 +1368,7 @@ async function renderCoverage() {
   const isoResults = (await Promise.all(isoPromises)).filter(Boolean);
   // A newer render superseded us while awaiting — discard these stale results
   if (myToken !== coverageToken) return;
+  updateApproxNote(isoResults);
   if (!isoResults.length) return;
 
   // Group by type
