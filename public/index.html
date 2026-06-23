@@ -157,6 +157,17 @@
     .legend-swatch { width: 14px; height: 14px; border-radius: 50%; flex-shrink: 0; }
     .legend-combined { display: flex; align-items: center; gap: 8px; font-size: 0.8rem; cursor: pointer; }
     .legend-combined input[type=checkbox] { accent-color: var(--accent); }
+    .legend-type { display: flex; flex-direction: column; }
+    .legend-name { flex: 1; }
+    .legend-filter-btn { background: none; border: none; color: var(--text2); cursor: pointer; padding: 2px 4px; border-radius: 4px; display: inline-flex; align-items: center; gap: 2px; }
+    .legend-filter-btn:hover { color: var(--text); background: var(--surface2); }
+    .legend-filter-btn.open { color: var(--accent); }
+    .legend-filter-btn.has-excluded { color: var(--accent2); }
+    .excl-badge { font-size: 0.6rem; font-weight: 700; }
+    .legend-sublist { display: flex; flex-direction: column; gap: 2px; margin: 2px 0 4px 20px; padding-left: 6px; border-left: 1px solid var(--border); }
+    .legend-locrow { display: flex; align-items: center; gap: 6px; font-size: 0.76rem; color: var(--text2); cursor: pointer; padding: 1px 0; }
+    .legend-locrow input { accent-color: var(--accent); flex-shrink: 0; }
+    .legend-locrow span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
     /* ── CONFIGURE PANEL ── */
     #panel-config {
@@ -461,6 +472,15 @@ let projectPins = [];
 let pinDropMode = false;
 let makePermanentPinId = null;
 
+// Per-type display toggles (in-memory) and per-location exclusions (persisted).
+// Excluded locations are dropped from coverage AND territory membership.
+let hiddenTypeIds = new Set();
+let excludedLocIds = new Set();
+let expandedTypeIds = new Set();
+
+// Cache of computed turf polygons per location, keyed by id+coords+range
+let locPolyCache = {};
+
 // Guards against stale async coverage renders re-drawing hidden types
 let coverageToken = 0;
 
@@ -495,6 +515,7 @@ async function init() {
 
   initMap();
   loadProjectPins();
+  loadExcluded();
   await loadAll();
 }
 
@@ -557,12 +578,38 @@ async function loadAll() {
   if (selectedTypeId) renderLocationsList();
 }
 
-// Shared visibility filter — which type IDs are toggled on in the legend
+// Shared visibility filter — type IDs whose display toggle is on
 function getVisibleTypeIds() {
-  const toggles = document.getElementById('type-legend').querySelectorAll('input[type=checkbox]');
-  const set = new Set();
-  locationTypes.forEach((t, i) => { if (toggles[i]?.checked) set.add(t._id); });
-  return set;
+  return new Set(locationTypes.filter(t => !hiddenTypeIds.has(t._id)).map(t => t._id));
+}
+
+// Toggle a whole type's visibility (display only — does not affect membership)
+function toggleTypeVisible(id, checked) {
+  if (checked) hiddenTypeIds.delete(id); else hiddenTypeIds.add(id);
+  applyVisibility();
+}
+
+// Expand/collapse the per-location filter list under a type
+function toggleTypeExpand(id) {
+  if (expandedTypeIds.has(id)) expandedTypeIds.delete(id); else expandedTypeIds.add(id);
+  renderTypeLegend();
+}
+
+// Include/exclude a single location from coverage + membership
+function toggleLocExcluded(id) {
+  if (excludedLocIds.has(id)) excludedLocIds.delete(id); else excludedLocIds.add(id);
+  saveExcluded();
+  renderTypeLegend();
+  renderPins();
+  renderCoverage();
+}
+
+function loadExcluded() {
+  try { excludedLocIds = new Set(JSON.parse(localStorage.getItem('excludedLocIds') || '[]')); }
+  catch (e) { excludedLocIds = new Set(); }
+}
+function saveExcluded() {
+  localStorage.setItem('excludedLocIds', JSON.stringify([...excludedLocIds]));
 }
 
 // Called when a legend toggle changes — keep pins and coverage in sync
@@ -604,15 +651,35 @@ function renderTypeList() {
 function renderTypeLegend() {
   const el = document.getElementById('type-legend');
   if (!locationTypes.length) { el.innerHTML = '<span class="hint">No types yet</span>'; return; }
-  el.innerHTML = locationTypes.map(t => `
-    <div class="legend-item">
-      <div class="legend-swatch" style="background:${t.color}"></div>
-      <span>${t.name}</span>
-      <label class="toggle-switch" title="Toggle ${t.name} visibility">
-        <input type="checkbox" checked onchange="applyVisibility()">
-        <span class="slider"></span>
-      </label>
-    </div>`).join('');
+  el.innerHTML = locationTypes.map(t => {
+    const locs = locations.filter(l => l.typeId === t._id);
+    const excludedCount = locs.filter(l => excludedLocIds.has(l._id)).length;
+    const expanded = expandedTypeIds.has(t._id);
+    const visChecked = !hiddenTypeIds.has(t._id);
+    const sublist = locs.length
+      ? locs.map(l => `
+        <label class="legend-locrow" title="${l.name}">
+          <input type="checkbox" ${excludedLocIds.has(l._id) ? '' : 'checked'} onchange="toggleLocExcluded('${l._id}')">
+          <span>${l.name}</span>
+        </label>`).join('')
+      : '<div class="hint" style="padding:2px 4px">No locations yet</div>';
+    return `
+    <div class="legend-type">
+      <div class="legend-item">
+        <div class="legend-swatch" style="background:${t.color}"></div>
+        <span class="legend-name">${t.name}</span>
+        <button class="legend-filter-btn ${expanded ? 'open' : ''} ${excludedCount ? 'has-excluded' : ''}"
+                onclick="toggleTypeExpand('${t._id}')" title="Filter individual ${t.name} locations">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M3 5h18l-7 8v5l-4 2v-7z"/></svg>${excludedCount ? `<span class="excl-badge">${excludedCount}</span>` : ''}
+        </button>
+        <label class="toggle-switch" title="Show/hide ${t.name} on map">
+          <input type="checkbox" ${visChecked ? 'checked' : ''} onchange="toggleTypeVisible('${t._id}', this.checked)">
+          <span class="slider"></span>
+        </label>
+      </div>
+      <div class="legend-sublist" style="display:${expanded ? 'flex' : 'none'}">${sublist}</div>
+    </div>`;
+  }).join('');
 }
 
 async function addLocationType() {
@@ -839,13 +906,14 @@ function renderPins() {
     if (!visible.has(type._id)) return;
     const locs = locations.filter(l => l.typeId === type._id);
     locs.forEach(l => {
+      const excluded = excludedLocIds.has(l._id);
       const icon = L.divIcon({
         className: '',
-        html: `<div style="width:14px;height:14px;border-radius:50%;background:${type.color};border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,0.5)"></div>`,
+        html: `<div style="width:14px;height:14px;border-radius:50%;background:${type.color};border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,0.5);opacity:${excluded ? 0.3 : 1}"></div>`,
         iconSize: [14, 14], iconAnchor: [7, 7]
       });
       const marker = L.marker([l.lat, l.lng], { icon })
-        .bindTooltip(`<b>${l.name}</b><br><span style="color:#888">${type.name}</span>`, { permanent: false, direction: 'top', offset: [0, -8] })
+        .bindTooltip(`<b>${l.name}</b><br><span style="color:#888">${type.name}${excluded ? ' · excluded' : ''}</span>`, { permanent: false, direction: 'top', offset: [0, -8] })
         .addTo(pinLayer);
     });
   });
@@ -915,10 +983,45 @@ function renderProjectPins() {
       html: `<div style="font-size:22px; line-height:1; filter:drop-shadow(0 2px 3px rgba(0,0,0,0.6)); transform:translate(-2px,-4px)">📌</div>`,
       iconSize: [24, 24], iconAnchor: [10, 22]
     });
-    L.marker([p.lat, p.lng], { icon })
-      .bindTooltip(`<b>${p.name}</b><br><span style="color:#888">Temporary project pin</span>`, { direction: 'top', offset: [0, -18] })
+    const marker = L.marker([p.lat, p.lng], { icon })
+      .bindTooltip(`<b>${p.name}</b><br><span style="color:#888">Click to see territories</span>`, { direction: 'top', offset: [0, -18] })
       .addTo(projectPinLayer);
+    marker.on('click', () => showPinTerritories(p));
   });
+}
+
+// Click a project pin → which territories' coverage contain this point?
+async function showPinTerritories(pin) {
+  const popup = L.popup({ maxWidth: 280 })
+    .setLatLng([pin.lat, pin.lng])
+    .setContent(`<div style="font-weight:700">📌 ${pin.name}</div><div style="color:#888;font-size:0.8rem;margin-top:4px">Checking coverage…</div>`)
+    .openOn(map);
+
+  const results = await Promise.all(locations.map(async l => {
+    if (excludedLocIds.has(l._id)) return null;         // excluded = unavailable
+    const type = locationTypes.find(t => t._id === l.typeId);
+    if (!type) return null;
+    const poly = await getLocationPolygon(l);
+    if (!poly) return null;
+    try {
+      if (turf.booleanPointInPolygon([pin.lng, pin.lat], poly)) return { loc: l, type };
+    } catch (e) { /* skip bad geometry */ }
+    return null;
+  }));
+  const matches = results.filter(Boolean);
+
+  let html = `<div style="font-weight:700;margin-bottom:6px">📌 ${pin.name}</div>`;
+  if (!matches.length) {
+    html += `<div style="color:#888;font-size:0.82rem">Not inside any territory's coverage area.</div>`;
+  } else {
+    html += `<div style="color:#888;font-size:0.78rem;margin-bottom:5px">Covered by ${matches.length} territor${matches.length > 1 ? 'ies' : 'y'}:</div>`;
+    html += matches.map(m => `
+      <div style="display:flex;align-items:center;gap:6px;font-size:0.83rem;padding:2px 0">
+        <span style="width:9px;height:9px;border-radius:50%;background:${m.type.color};display:inline-block;flex-shrink:0"></span>
+        <b>${m.loc.name}</b><span style="color:#888">· ${m.type.name}</span>
+      </div>`).join('');
+  }
+  popup.setContent(html);
 }
 
 function renderProjectPinList() {
@@ -1057,6 +1160,29 @@ function isoToTurfPolygon(iso) {
   }
 }
 
+// Drive-time (minutes) for a location, honoring its custom override or type default
+function locationMinutes(l) {
+  const type = locationTypes.find(t => t._id === l.typeId);
+  if (!type) return null;
+  if (l.customRadius) return l.customRadiusUnit === 'miles' ? milesToMinutes(l.customRadius) : l.customRadius;
+  return type.defaultRadiusUnit === 'miles' ? milesToMinutes(type.defaultRadius) : type.defaultRadius;
+}
+
+// Fetch+cache the turf coverage polygon for a single location
+async function getLocationPolygon(l) {
+  const minutes = locationMinutes(l);
+  if (minutes == null) return null;
+  const sig = `${l._id}:${l.lat}:${l.lng}:${minutes}`;
+  if (locPolyCache[sig]) return locPolyCache[sig];
+  const iso = await fetch('/api/isochrone', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ lat: l.lat, lng: l.lng, minutes })
+  }).then(r => r.json());
+  const poly = isoToTurfPolygon(iso);
+  locPolyCache[sig] = poly;
+  return poly;
+}
+
 // Union an array of turf polygons into one feature (or null)
 function unionAll(polygons) {
   if (!polygons.length) return null;
@@ -1078,21 +1204,14 @@ async function renderCoverage() {
 
   const visibleTypeIds = getVisibleTypeIds();
 
-  // Fetch isochrones for all visible locations
+  // Build coverage polygons for visible, non-excluded locations
   const isoPromises = locations.map(async l => {
     const type = locationTypes.find(t => t._id === l.typeId);
     if (!type || !visibleTypeIds.has(l.typeId)) return null;
-    let minutes;
-    if (l.customRadius) {
-      minutes = l.customRadiusUnit === 'miles' ? milesToMinutes(l.customRadius) : l.customRadius;
-    } else {
-      minutes = type.defaultRadiusUnit === 'miles' ? milesToMinutes(type.defaultRadius) : type.defaultRadius;
-    }
-    const iso = await fetch('/api/isochrone', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ lat: l.lat, lng: l.lng, minutes })
-    }).then(r => r.json());
-    return { loc: l, type, iso, minutes };
+    if (excludedLocIds.has(l._id)) return null;
+    const poly = await getLocationPolygon(l);
+    if (!poly) return null;
+    return { loc: l, type, poly };
   });
 
   const isoResults = (await Promise.all(isoPromises)).filter(Boolean);
@@ -1109,7 +1228,7 @@ async function renderCoverage() {
 
   if (showCombined) {
     // Combined mode: union ALL visible shapes across ALL types → one single merged blob
-    const allPolygons = isoResults.map(item => isoToTurfPolygon(item.iso));
+    const allPolygons = isoResults.map(item => item.poly);
     const combinedUnion = unionAll(allPolygons);
     if (combinedUnion) {
       L.geoJSON(combinedUnion, {
@@ -1121,7 +1240,7 @@ async function renderCoverage() {
     // Heat map: draw each location individually — overlaps stack and darken naturally
     Object.values(typeGroups).forEach(({ type, items }) => {
       items.forEach(item => {
-        const poly = isoToTurfPolygon(item.iso);
+        const poly = item.poly;
         L.geoJSON(poly, {
           style: { color: type.color, fillColor: type.color, fillOpacity: 0.22, weight: 1.5, opacity: 0.5 }
         }).addTo(coverageLayer);
@@ -1131,7 +1250,7 @@ async function renderCoverage() {
   } else {
     // Merged: union all shapes per type → one clean blob per type, no internal overlaps
     Object.values(typeGroups).forEach(({ type, items }) => {
-      const polygons = items.map(item => isoToTurfPolygon(item.iso));
+      const polygons = items.map(item => item.poly);
       const merged = unionAll(polygons);
       if (merged) {
         L.geoJSON(merged, {
