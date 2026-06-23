@@ -140,6 +140,18 @@ app.get('/api/geocode', async (req, res) => {
 function isoCacheKey(lat, lng, minutes) {
   return `v2:${Number(lat).toFixed(5)},${Number(lng).toFixed(5)},${minutes}`;
 }
+// A geometry is only useful if it actually has coordinates to draw. A null or
+// empty geometry can sneak into the cache when turf.buffer returns a Feature
+// with no geometry (it happens on some inputs) — and because the cache is
+// persistent, one bad entry would otherwise be served forever, so a range that
+// was poisoned during a past bug "never draws" even after the code is fixed.
+// Validating here lets poisoned entries fall through and rebuild themselves.
+function hasDrawableGeometry(g) {
+  if (!g) return false;
+  if (g.type === 'FeatureCollection') return Array.isArray(g.features) && g.features.some(hasDrawableGeometry);
+  const geom = g.type === 'Feature' ? g.geometry : g;
+  return !!(geom && Array.isArray(geom.coordinates) && geom.coordinates.length);
+}
 function isoCacheGet(key) {
   return new Promise(resolve => db.isochroneCache.findOne({ key }, (err, doc) => resolve(err ? null : doc)));
 }
@@ -165,7 +177,7 @@ app.post('/api/isochrone', async (req, res) => {
   // 1. Serve the finished shape straight from cache when possible.
   if (!force) {
     const cached = await isoCacheGet(finalKey);
-    if (cached && cached.geojson) {
+    if (cached && hasDrawableGeometry(cached.geojson)) {
       return res.json({ type: 'isochrone', geojson: cached.geojson, extendMinutes: cached.extendMinutes || 0, cached: true });
     }
   }
@@ -180,7 +192,7 @@ app.post('/api/isochrone', async (req, res) => {
     let feature = null;
     if (!force) {
       const raw = await isoCacheGet(rawKey);
-      if (raw && raw.geojson) feature = raw.geojson;
+      if (raw && hasDrawableGeometry(raw.geojson)) feature = raw.geojson;
     }
     if (!feature) {
       const r = await fetch('https://api.openrouteservice.org/v2/isochrones/driving-car', {
@@ -206,10 +218,15 @@ app.post('/api/isochrone', async (req, res) => {
       try {
         const km = (extendMinutes / 60) * 50; // ~50mph
         const buffered = turfBuffer(feature, km, { units: 'kilometers' });
-        if (buffered) { finalGeo = buffered; remaining = 0; }
+        // Only accept the buffered shape if it actually produced geometry;
+        // otherwise keep the capped isochrone and let the client pad it, so a
+        // failed buffer never gets cached as a blank shape that won't draw.
+        if (hasDrawableGeometry(buffered)) { finalGeo = buffered; remaining = 0; }
+        else console.warn(`turf.buffer produced no geometry for ${minutes}min @ ${lat},${lng}; deferring pad to client`);
       } catch (e) { /* leave remaining for client to buffer */ }
     }
-    isoCacheSet(finalKey, finalGeo, remaining);
+    // Never persist a shape we can't draw — that would poison the cache.
+    if (hasDrawableGeometry(finalGeo)) isoCacheSet(finalKey, finalGeo, remaining);
     res.json({ type: 'isochrone', geojson: finalGeo, extendMinutes: remaining, cached: false });
   } catch (e) {
     res.json({ type: 'circle', lat, lng, radiusMeters: minutesToMeters(minutes), reason: e.message });
