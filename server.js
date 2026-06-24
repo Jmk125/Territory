@@ -138,6 +138,11 @@ app.get('/api/geocode', async (req, res) => {
 const ORS_PUBLIC_URL = 'https://api.openrouteservice.org';
 const ORS_DEFAULT_MAX_MINUTES = 60;   // public ORS API hard cap
 const ORS_SETTINGS_KEY = 'ors';
+// How long to wait on an ORS request before giving up. Large self-hosted
+// isochrones (e.g. 90+ min, fastisochrones disabled) can take a while to
+// compute, so this is generous — a genuinely unreachable host fails fast with
+// a connection error long before this fires. Override with ORS_TIMEOUT_MS.
+const ORS_TIMEOUT_MS = parseInt(process.env.ORS_TIMEOUT_MS, 10) || 120000;
 
 // Until the user saves a choice from the UI, fall back to the legacy .env vars
 // (ORS_BASE_URL / ORS_MAX_RANGE_SEC) so existing deployments keep working
@@ -167,7 +172,7 @@ function getOrsSettings() {
 // fetch with an abort timeout so a slow/unreachable ORS server (e.g. a wrong
 // self-hosted IP) fails fast and falls back to circles/estimates instead of
 // hanging every coverage request.
-async function fetchWithTimeout(url, opts = {}, ms = 15000) {
+async function fetchWithTimeout(url, opts = {}, ms = ORS_TIMEOUT_MS) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), ms);
   try {
