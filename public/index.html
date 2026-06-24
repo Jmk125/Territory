@@ -18,6 +18,7 @@
       --accent2: #f7c94f;
       --danger: #e05252;
       --success: #4fba7c;
+      --pin-bubble: #ff5da2;
       --text: #e2e6f0;
       --text2: #8892a4;
       --radius: 8px;
@@ -156,8 +157,22 @@
       background: var(--surface); border: 1px solid var(--border);
       border-radius: var(--radius); padding: 12px; width: 220px;
       display: flex; flex-direction: column; gap: 10px;
+      max-height: calc(100% - 24px); overflow-y: auto;
+      transition: transform 0.28s cubic-bezier(0.4,0,0.2,1), opacity 0.22s;
     }
+    .map-controls.collapsed { transform: translateX(calc(100% + 16px)); opacity: 0; pointer-events: none; }
     .map-controls h3 { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text2); margin-bottom: 2px; }
+    .mc-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    .mc-collapse-btn { background: none; border: none; color: var(--text2); cursor: pointer; font-size: 1.15rem; line-height: 1; padding: 0 4px; border-radius: 6px; }
+    .mc-collapse-btn:hover { color: var(--text); background: var(--surface2); }
+    .mc-reopen-btn {
+      position: absolute; top: 12px; right: 12px; z-index: 800;
+      background: var(--surface); border: 1px solid var(--border); color: var(--text);
+      border-radius: var(--radius); padding: 8px 12px; cursor: pointer;
+      font-size: 0.78rem; font-weight: 600; align-items: center; gap: 6px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.35);
+    }
+    .mc-reopen-btn:hover { border-color: var(--accent); color: var(--accent); }
     .map-ctrl-row { display: flex; align-items: center; gap: 8px; font-size: 0.8rem; }
     .map-ctrl-row label { flex: 1; }
     .toggle-switch { position: relative; width: 36px; height: 20px; }
@@ -324,12 +339,18 @@
     .hint { font-size: 0.72rem; color: var(--text2); }
 
     /* ── PROJECT PINS ── */
-    .project-pin-list { display: flex; flex-direction: column; gap: 4px; max-height: 180px; overflow-y: auto; }
-    .ppin-item { display: flex; align-items: center; gap: 4px; font-size: 0.78rem; background: var(--surface2); border: 1px solid var(--border); border-radius: var(--radius); padding: 5px 6px; }
+    .project-pin-list { display: flex; flex-direction: column; gap: 4px; max-height: 220px; overflow-y: auto; }
+    .ppin-item { display: flex; flex-direction: column; align-items: stretch; gap: 5px; font-size: 0.78rem; background: var(--surface2); border: 1px solid var(--border); border-radius: var(--radius); padding: 5px 6px; }
+    .ppin-main { display: flex; align-items: center; gap: 4px; }
     .ppin-name { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .ppin-actions { display: flex; gap: 2px; flex-shrink: 0; }
     .ppin-actions button { background: none; border: none; color: var(--text2); cursor: pointer; font-size: 0.85rem; line-height: 1; padding: 2px 3px; border-radius: 4px; }
     .ppin-actions button:hover { color: var(--text); background: var(--bg); }
+    .ppin-bubble { display: flex; align-items: center; gap: 5px; font-size: 0.73rem; color: var(--text2); cursor: pointer; padding-top: 4px; border-top: 1px solid var(--border); }
+    .ppin-bubble input[type=checkbox] { accent-color: var(--pin-bubble); flex-shrink: 0; }
+    .ppin-bubble .ppin-mins { width: 50px; padding: 3px 5px; font-size: 0.73rem; }
+    .ppin-bubble .ppin-mins:disabled { opacity: 0.4; }
+    .ppin-bubble .ppin-bubble-lbl { flex: 1; }
 
     /* ── MODAL ── */
     .modal-overlay { position: fixed; inset: 0; z-index: 5000; background: rgba(0,0,0,0.6); display: flex; align-items: center; justify-content: center; }
@@ -408,8 +429,13 @@
 <div id="panel-map" class="panel active">
   <div id="map"></div>
 
-  <div class="map-controls">
-    <h3>Coverage Display</h3>
+  <button class="mc-reopen-btn" id="mc-reopen-btn" onclick="toggleCoveragePane()" title="Show coverage panel" style="display:none">☰ Coverage</button>
+
+  <div class="map-controls" id="map-controls">
+    <div class="mc-header">
+      <h3>Coverage Display</h3>
+      <button class="mc-collapse-btn" onclick="toggleCoveragePane()" title="Collapse panel">›</button>
+    </div>
 
     <div class="section-divider">View Mode</div>
     <div class="radio-group">
@@ -437,6 +463,7 @@
       <input type="text" id="pin-addr" placeholder="Search an address to add a pin..." oninput="pinGeocodeSearch(this.value)" autocomplete="off" />
       <div class="geocode-results" id="pin-geo-results" style="display:none"></div>
     </div>
+    <button class="btn btn-ghost btn-sm" id="pin-drop-btn" onclick="togglePinDropMode()">📍 Drop a pin on the map</button>
     <div id="project-pin-list" class="project-pin-list"></div>
 
     <button class="btn btn-ghost btn-sm" onclick="refreshMap()" style="margin-top:4px;">↺ Refresh Coverage</button>
@@ -501,7 +528,9 @@
 // ══════════════════════════════════
 // STATE
 // ══════════════════════════════════
-let map, coverageLayer, pinLayer, projectPinLayer;
+let map, coverageLayer, pinLayer, projectPinLayer, projectBubbleLayer;
+let pinDropMode = false;
+let bubbleToken = 0;
 let locationTypes = [];
 let locations = [];
 let selectedTypeId = null;
@@ -579,12 +608,13 @@ async function boot() {
   if (booted) return;
   booted = true;
   initMap();
+  restoreCoveragePaneState();
   loadProjectPins();
   loadExcluded();
   progressSet(0);
   await loadData();
   await prefetchCoverage();
-  if (!splashVisible) renderCoverage();
+  if (!splashVisible) { renderCoverage(); renderProjectBubbles(); }
 }
 
 function dismissSplash() {
@@ -595,6 +625,7 @@ function dismissSplash() {
   setTimeout(() => splash.style.display = 'none', 500);
   boot();          // safety: start if it somehow hasn't
   renderCoverage(); // draw now (polygons are already prefetched → fast)
+  renderProjectBubbles();
 }
 
 // ══════════════════════════════════
@@ -651,10 +682,18 @@ function initMap() {
   }).addTo(map);
 
   coverageLayer = L.layerGroup().addTo(map);
+  projectBubbleLayer = L.layerGroup().addTo(map);
   pinLayer = L.layerGroup().addTo(map);
   projectPinLayer = L.layerGroup().addTo(map);
 
   map.on('click', (e) => {
+    // Drop-pin mode: next map click drops a draggable temporary project pin
+    if (pinDropMode && document.getElementById('panel-map').classList.contains('active')) {
+      addProjectPin(e.latlng.lat, e.latlng.lng, null, '');
+      togglePinDropMode();
+      return;
+    }
+
     // Territory popup: show covering territories on click (map tab only)
     if (document.getElementById('panel-map').classList.contains('active')) {
       const pt = [e.latlng.lng, e.latlng.lat];
@@ -709,6 +748,38 @@ function initMap() {
 
 function refreshMap() {
   loadAll();
+}
+
+// ── Collapsible coverage pane (slides horizontally off the right edge) ──
+function toggleCoveragePane() {
+  const panel = document.getElementById('map-controls');
+  const reopen = document.getElementById('mc-reopen-btn');
+  if (!panel) return;
+  const collapsed = !panel.classList.contains('collapsed');
+  panel.classList.toggle('collapsed', collapsed);
+  if (reopen) reopen.style.display = collapsed ? 'flex' : 'none';
+  localStorage.setItem('coveragePaneCollapsed', collapsed ? '1' : '0');
+}
+
+function restoreCoveragePaneState() {
+  if (localStorage.getItem('coveragePaneCollapsed') === '1') {
+    document.getElementById('map-controls')?.classList.add('collapsed');
+    const reopen = document.getElementById('mc-reopen-btn');
+    if (reopen) reopen.style.display = 'flex';
+  }
+}
+
+// ── Drop-pin mode: arm the map so the next click drops a temporary pin ──
+function togglePinDropMode() {
+  pinDropMode = !pinDropMode;
+  const btn = document.getElementById('pin-drop-btn');
+  if (btn) {
+    btn.textContent = pinDropMode ? '✕ Cancel — click the map' : '📍 Drop a pin on the map';
+    btn.classList.toggle('btn-primary', pinDropMode);
+    btn.classList.toggle('btn-ghost', !pinDropMode);
+  }
+  const mapEl = document.getElementById('map');
+  if (mapEl) mapEl.style.cursor = pinDropMode ? 'crosshair' : '';
 }
 
 // ══════════════════════════════════
@@ -1309,7 +1380,7 @@ function selectPinGeoResult(i) {
 
 function addProjectPin(lat, lng, name, address) {
   const id = 'p' + Date.now() + Math.random().toString(36).slice(2, 6);
-  projectPins.push({ id, name: name || `Project ${projectPins.length + 1}`, lat, lng, address: address || '' });
+  projectPins.push({ id, name: name || `Project ${projectPins.length + 1}`, lat, lng, address: address || '', bubble: false, bubbleMinutes: 30 });
   saveProjectPins();
   renderProjectPins();
   renderProjectPinList();
@@ -1320,6 +1391,7 @@ function removeProjectPin(id) {
   saveProjectPins();
   renderProjectPins();
   renderProjectPinList();
+  renderProjectBubbles();
 }
 
 function renameProjectPin(id) {
@@ -1340,6 +1412,7 @@ function clearProjectPins() {
   saveProjectPins();
   renderProjectPins();
   renderProjectPinList();
+  renderProjectBubbles();
 }
 
 function renderProjectPins() {
@@ -1351,11 +1424,66 @@ function renderProjectPins() {
       html: `<div style="font-size:22px; line-height:1; filter:drop-shadow(0 2px 3px rgba(0,0,0,0.6)); transform:translate(-2px,-4px)">📌</div>`,
       iconSize: [24, 24], iconAnchor: [10, 22]
     });
-    const marker = L.marker([p.lat, p.lng], { icon })
-      .bindTooltip(`<b>${p.name}</b><br><span style="color:#888">Click to see territories</span>`, { direction: 'top', offset: [0, -18] })
+    const marker = L.marker([p.lat, p.lng], { icon, draggable: true })
+      .bindTooltip(`<b>${escapeHtml(p.name)}</b><br><span style="color:#888">Drag to move · click for territories</span>`, { direction: 'top', offset: [0, -18] })
       .addTo(projectPinLayer);
     marker.on('click', () => showPinTerritories(p));
+    marker.on('dragend', (e) => {
+      const ll = e.target.getLatLng();
+      p.lat = ll.lat; p.lng = ll.lng;
+      p.address = '';   // dragged off its geocoded address → now a custom location
+      saveProjectPins();
+      renderProjectPinList();
+      if (p.bubble) renderProjectBubbles();
+    });
   });
+}
+
+// Draw a drive-time "travel bubble" (isochrone) for each pin that has it enabled
+async function renderProjectBubbles() {
+  if (!projectBubbleLayer) return;
+  const myToken = ++bubbleToken;
+  projectBubbleLayer.clearLayers();
+  const active = projectPins.filter(p => p.bubble);
+  for (const p of active) {
+    const minutes = parseInt(p.bubbleMinutes, 10) || 30;
+    let iso;
+    try {
+      iso = await fetch('/api/isochrone', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ lat: p.lat, lng: p.lng, minutes })
+      }).then(r => r.json());
+    } catch (e) { continue; }
+    // A newer render (e.g. a drag or toggle) superseded us — bail before drawing
+    if (myToken !== bubbleToken) return;
+    const poly = isoToTurfPolygon(iso);
+    if (poly) {
+      L.geoJSON(poly, {
+        style: { color: '#ff5da2', fillColor: '#ff5da2', fillOpacity: 0.16, weight: 2, opacity: 0.9, dashArray: '6 5' }
+      }).addTo(projectBubbleLayer);
+    }
+  }
+}
+
+function togglePinBubble(id, on) {
+  const p = projectPins.find(x => x.id === id);
+  if (!p) return;
+  p.bubble = !!on;
+  if (p.bubble && !p.bubbleMinutes) p.bubbleMinutes = 30;
+  saveProjectPins();
+  renderProjectPinList();
+  renderProjectBubbles();
+}
+
+function setPinBubbleMinutes(id, val) {
+  const p = projectPins.find(x => x.id === id);
+  if (!p) return;
+  let m = parseInt(val, 10);
+  if (isNaN(m) || m < 1) m = 30;
+  if (m > 300) m = 300;
+  p.bubbleMinutes = m;
+  saveProjectPins();
+  if (p.bubble) renderProjectBubbles();
 }
 
 // Click a project pin → modal listing covering territories, sorted by drive time
@@ -1448,16 +1576,29 @@ function renderProjectPinList() {
     el.innerHTML = '<span class="hint">No pins. Search an address above to add one.</span>';
     return;
   }
-  el.innerHTML = projectPins.map(p => `
+  el.innerHTML = projectPins.map(p => {
+    const on = !!p.bubble;
+    const mins = p.bubbleMinutes || 30;
+    return `
     <div class="ppin-item">
-      <span class="ppin-name" title="${p.name}">📌 ${p.name}</span>
-      <span class="ppin-actions">
-        <button title="Rename" onclick="renameProjectPin('${p.id}')">✏</button>
-        <button title="View on map" onclick="map.flyTo([${p.lat}, ${p.lng}], 12, {duration:1})">🗺</button>
-        <button title="Make permanent" onclick="openMakePermanent('${p.id}')">⭐</button>
-        <button title="Remove" onclick="removeProjectPin('${p.id}')">✕</button>
-      </span>
-    </div>`).join('') +
+      <div class="ppin-main">
+        <span class="ppin-name" title="${escapeHtml(p.name)}">📌 ${escapeHtml(p.name)}</span>
+        <span class="ppin-actions">
+          <button title="Rename" onclick="renameProjectPin('${p.id}')">✏</button>
+          <button title="View on map" onclick="map.flyTo([${p.lat}, ${p.lng}], 12, {duration:1})">🗺</button>
+          <button title="Make permanent" onclick="openMakePermanent('${p.id}')">⭐</button>
+          <button title="Remove" onclick="removeProjectPin('${p.id}')">✕</button>
+        </span>
+      </div>
+      <label class="ppin-bubble" title="Draw a drive-time bubble around this pin">
+        <input type="checkbox" ${on ? 'checked' : ''} onchange="togglePinBubble('${p.id}', this.checked)">
+        <span class="ppin-bubble-lbl">Travel bubble</span>
+        <input type="number" class="ppin-mins" min="1" max="300" value="${mins}" ${on ? '' : 'disabled'}
+               onchange="setPinBubbleMinutes('${p.id}', this.value)" onclick="event.stopPropagation()">
+        <span>min</span>
+      </label>
+    </div>`;
+  }).join('') +
     `<button class="btn btn-ghost btn-sm" style="margin-top:2px" onclick="clearProjectPins()">Clear all</button>`;
 }
 
