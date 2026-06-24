@@ -161,6 +161,10 @@
       transition: transform 0.28s cubic-bezier(0.4,0,0.2,1), opacity 0.22s;
     }
     .map-controls.collapsed { transform: translateX(calc(100% + 16px)); opacity: 0; pointer-events: none; }
+    /* Keep sections at their natural height so an overflowing pane scrolls
+       instead of vertically compressing children (which squished the View
+       Mode toggles into textless slivers). */
+    .map-controls > * { flex-shrink: 0; }
     .map-controls h3 { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text2); margin-bottom: 2px; }
     .mc-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
     .mc-collapse-btn { background: none; border: none; color: var(--text2); cursor: pointer; font-size: 1.15rem; line-height: 1; padding: 0 4px; border-radius: 6px; }
@@ -560,6 +564,9 @@ let locPolyCache = {};
 // excluding them changes nothing. Recomputed lazily for expanded type filters.
 let borderImpactingIds = new Set();
 let borderCalcToken = 0;
+// Memoized results per type, keyed by a signature of its included locations +
+// their geometry, so merely re-opening a filter doesn't recompute.
+let borderCalcCache = {};
 
 // Guards against stale async coverage renders re-drawing hidden types
 let coverageToken = 0;
@@ -965,9 +972,23 @@ function toggleTypeExpand(id) {
   renderTypeLegend();
 }
 
-// Flag the locations of a type whose individual coverage reaches past every
-// neighbor — i.e. dropping them shrinks the type's overall merged area. Uses a
-// leave-one-out area comparison over the (cached) coverage polygons.
+// Union two turf polygons, tolerating bad geometry
+function safeUnion(a, b) {
+  if (!a) return b;
+  if (!b) return a;
+  try { return turf.union(a, b) || a; } catch (e) { return a; }
+}
+
+// Drop a type's cached border result for the locations of that type
+function clearBorderFlags(typeId) {
+  locations.filter(l => l.typeId === typeId).forEach(l => borderImpactingIds.delete(l._id));
+}
+
+// Flag the locations of a type whose coverage reaches past every neighbor —
+// i.e. dropping them shrinks the type's overall merged area by a meaningful
+// amount. A location is flagged when its leave-one-out area loss exceeds 5% of
+// the type's total coverage. Prefix/suffix unions keep this O(n), not O(n²),
+// and identical inputs are served from a memo cache.
 async function computeBorderImpacting(typeId) {
   const myToken = ++borderCalcToken;
   if (!locationTypes.some(t => t._id === typeId)) return;
@@ -976,24 +997,50 @@ async function computeBorderImpacting(typeId) {
   const locs = locations.filter(l =>
     l.typeId === typeId && !excludedLocIds.has(l._id) &&
     typeof l.lat === 'number' && typeof l.lng === 'number');
+
+  // Reuse the last result when the included set and geometry are unchanged
+  const sig = locs.map(l => `${l._id}:${l.lat}:${l.lng}:${locationMinutes(l)}`).sort().join('|');
+  const cached = borderCalcCache[typeId];
+  clearBorderFlags(typeId);
+  if (cached && cached.sig === sig) {
+    cached.ids.forEach(id => borderImpactingIds.add(id));
+    renderTypeLegend();
+    return;
+  }
+
   const entries = [];
   for (const l of locs) {
     const poly = await getLocationPolygon(l);
     if (poly) entries.push({ id: l._id, poly });
   }
   if (myToken !== borderCalcToken) return; // a newer recompute superseded us
-  // Clear prior flags for this type before re-flagging
-  locations.filter(l => l.typeId === typeId).forEach(l => borderImpactingIds.delete(l._id));
-  if (entries.length) {
-    const fullArea = turf.area(unionAll(entries.map(e => e.poly)));
-    const thresh = Math.max(1, fullArea * 1e-4); // ignore floating-point slivers
-    entries.forEach((e, i) => {
-      const others = entries.filter((_, j) => j !== i).map(x => x.poly);
-      const otherArea = others.length ? turf.area(unionAll(others)) : 0;
-      if (fullArea - otherArea > thresh) borderImpactingIds.add(e.id);
-    });
+
+  const flagged = [];
+  const n = entries.length;
+  if (n) {
+    const polys = entries.map(e => e.poly);
+    // prefix[i] = union of polys[0..i]; suffix[i] = union of polys[i..n-1].
+    // "everyone but i" is then union(prefix[i-1], suffix[i+1]).
+    const prefix = new Array(n), suffix = new Array(n);
+    prefix[0] = polys[0];
+    for (let i = 1; i < n; i++) prefix[i] = safeUnion(prefix[i - 1], polys[i]);
+    suffix[n - 1] = polys[n - 1];
+    for (let i = n - 2; i >= 0; i--) suffix[i] = safeUnion(suffix[i + 1], polys[i]);
+    const fullArea = turf.area(prefix[n - 1]);
+    const thresh = fullArea * 0.05; // ignore contributions under 5% of total
+    for (let i = 0; i < n; i++) {
+      let others = null;
+      if (i === 0) others = n > 1 ? suffix[1] : null;
+      else if (i === n - 1) others = prefix[n - 2];
+      else others = safeUnion(prefix[i - 1], suffix[i + 1]);
+      const otherArea = others ? turf.area(others) : 0;
+      if (fullArea - otherArea > thresh) flagged.push(entries[i].id);
+    }
   }
+  borderCalcCache[typeId] = { sig, ids: flagged };
   if (myToken !== borderCalcToken) return;
+  clearBorderFlags(typeId);
+  flagged.forEach(id => borderImpactingIds.add(id));
   renderTypeLegend();
 }
 
