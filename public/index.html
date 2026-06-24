@@ -343,7 +343,6 @@
     .ors-opt input { margin-top: 3px; }
     .ors-opt-title { font-weight: 700; font-size: 0.88rem; margin-bottom: 2px; }
     .ors-opt code, .modal-body code { background: var(--surface2); padding: 1px 4px; border-radius: 4px; font-size: 0.85em; }
-    .territory-hover-tip { pointer-events: none; max-width: 350px; }
   </style>
 </head>
 <body>
@@ -655,64 +654,48 @@ function initMap() {
   pinLayer = L.layerGroup().addTo(map);
   projectPinLayer = L.layerGroup().addTo(map);
 
-  // Hover tooltip: show territories covering the cursor position
-  const hoverTooltip = L.tooltip({ permanent: true, direction: 'right', offset: [12, 0], className: 'territory-hover-tip' });
-  let hoverThrottle = 0;
-  let lastHoverHtml = '';
-
-  map.on('mousemove', (e) => {
-    const now = Date.now();
-    if (now - hoverThrottle < 120) return;
-    hoverThrottle = now;
-
-    const pt = [e.latlng.lng, e.latlng.lat];
-    const visibleTypeIds = getVisibleTypeIds();
-    const matches = [];
-
-    for (const l of locations) {
-      if (excludedLocIds.has(l._id)) continue;
-      const type = locationTypes.find(t => t._id === l.typeId);
-      if (!type || !visibleTypeIds.has(type._id)) continue;
-      const minutes = locationMinutes(l);
-      if (minutes == null) continue;
-      const sig = `${l._id}:${l.lat}:${l.lng}:${minutes}`;
-      const poly = locPolyCache[sig];
-      if (!poly) continue;
-      try {
-        if (turf.booleanPointInPolygon(pt, poly)) matches.push({ loc: l, type });
-      } catch (_) {}
-    }
-
-    if (!matches.length) {
-      if (map.hasLayer(hoverTooltip)) map.removeLayer(hoverTooltip);
-      lastHoverHtml = '';
-      return;
-    }
-
-    // Group by type
-    const groups = {};
-    matches.forEach(m => {
-      (groups[m.type._id] = groups[m.type._id] || { type: m.type, items: [] }).items.push(m);
-    });
-    const html = Object.values(groups).map(g =>
-      `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${g.type.color};margin-right:4px"></span>` +
-      `<b>${escapeHtml(g.type.name)}</b>: ${g.items.map(i => escapeHtml(i.loc.name)).join(', ')}`
-    ).join('<br>');
-
-    if (html !== lastHoverHtml) {
-      hoverTooltip.setContent(`<div style="font-size:12px;line-height:1.5">${html}</div>`);
-      lastHoverHtml = html;
-    }
-    hoverTooltip.setLatLng(e.latlng);
-    if (!map.hasLayer(hoverTooltip)) map.addLayer(hoverTooltip);
-  });
-
-  map.on('mouseout', () => {
-    if (map.hasLayer(hoverTooltip)) map.removeLayer(hoverTooltip);
-    lastHoverHtml = '';
-  });
-
   map.on('click', (e) => {
+    // Territory popup: show covering territories on click (map tab only)
+    if (document.getElementById('panel-map').classList.contains('active')) {
+      const pt = [e.latlng.lng, e.latlng.lat];
+      const visibleTypeIds = getVisibleTypeIds();
+      const matches = [];
+
+      for (const l of locations) {
+        if (excludedLocIds.has(l._id)) continue;
+        const type = locationTypes.find(t => t._id === l.typeId);
+        if (!type || !visibleTypeIds.has(type._id)) continue;
+        const minutes = locationMinutes(l);
+        if (minutes == null) continue;
+        const sig = `${l._id}:${l.lat}:${l.lng}:${minutes}`;
+        const poly = locPolyCache[sig];
+        if (!poly) continue;
+        try {
+          if (turf.booleanPointInPolygon(pt, poly)) matches.push({ loc: l, type });
+        } catch (_) {}
+      }
+
+      if (matches.length) {
+        const groups = {};
+        matches.forEach(m => {
+          (groups[m.type._id] = groups[m.type._id] || { type: m.type, items: [] }).items.push(m);
+        });
+        const html = Object.values(groups).map(g =>
+          `<div style="margin-bottom:6px">` +
+          `<span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:${g.type.color};margin-right:5px;vertical-align:middle"></span>` +
+          `<b>${escapeHtml(g.type.name)}</b> <span style="color:#888">(${g.items.length})</span>` +
+          `<div style="padding-left:14px;margin-top:2px">${g.items.map(i => escapeHtml(i.loc.name)).join('<br>')}</div>` +
+          `</div>`
+        ).join('');
+        const total = matches.length;
+        L.popup({ maxWidth: 300, maxHeight: 350 })
+          .setLatLng(e.latlng)
+          .setContent(`<div style="font-size:12px;line-height:1.5"><div style="font-weight:700;margin-bottom:6px">${total} Territor${total > 1 ? 'ies' : 'y'}</div>${html}</div>`)
+          .openOn(map);
+        return;
+      }
+    }
+
     // On the Configure tab → set the new-location coords
     const latEl = document.getElementById('new-loc-lat');
     const lngEl = document.getElementById('new-loc-lng');
