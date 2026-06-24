@@ -826,10 +826,10 @@ async function saveOrsSettings() {
     body: JSON.stringify({ mode, selfHostedUrl, maxRangeMinutes })
   });
   closeModal();
-  locPolyCache = {};            // cached shapes depend on the source + limit
+  // Don't clear locPolyCache or refreshMap — existing bubbles on the map should
+  // be preserved; only new/missing isochrones will use the updated source.
   await refreshOrsStatus();
   renderTypeList();             // refresh "approx beyond N min" labels
-  refreshMap();
 }
 
 // ══════════════════════════════════
