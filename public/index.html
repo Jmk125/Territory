@@ -202,6 +202,7 @@
     .legend-locrow { display: flex; align-items: center; gap: 6px; font-size: 0.76rem; color: var(--text2); cursor: pointer; padding: 1px 0; }
     .legend-locrow input { accent-color: var(--accent); flex-shrink: 0; }
     .legend-locrow span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .border-dot { width: 9px; height: 9px; border-radius: 50%; margin-left: auto; flex-shrink: 0; box-shadow: 0 0 0 1px rgba(0,0,0,0.35); }
 
     /* ── CONFIGURE PANEL ── */
     #panel-config {
@@ -553,6 +554,12 @@ let expandedTypeIds = new Set();
 
 // Cache of computed turf polygons per location, keyed by id+coords+range
 let locPolyCache = {};
+
+// Locations on the coverage "border": removing one shrinks its type's total
+// merged coverage area. Interior locations are subsumed by neighbors, so
+// excluding them changes nothing. Recomputed lazily for expanded type filters.
+let borderImpactingIds = new Set();
+let borderCalcToken = 0;
 
 // Guards against stale async coverage renders re-drawing hidden types
 let coverageToken = 0;
@@ -953,7 +960,40 @@ function toggleTypeVisible(id, checked) {
 
 // Expand/collapse the per-location filter list under a type
 function toggleTypeExpand(id) {
-  if (expandedTypeIds.has(id)) expandedTypeIds.delete(id); else expandedTypeIds.add(id);
+  if (expandedTypeIds.has(id)) expandedTypeIds.delete(id);
+  else { expandedTypeIds.add(id); computeBorderImpacting(id); }
+  renderTypeLegend();
+}
+
+// Flag the locations of a type whose individual coverage reaches past every
+// neighbor — i.e. dropping them shrinks the type's overall merged area. Uses a
+// leave-one-out area comparison over the (cached) coverage polygons.
+async function computeBorderImpacting(typeId) {
+  const myToken = ++borderCalcToken;
+  if (!locationTypes.some(t => t._id === typeId)) return;
+  // Only the currently-included locations are evaluated; excluded ones are
+  // already filtered out and shouldn't be flagged.
+  const locs = locations.filter(l =>
+    l.typeId === typeId && !excludedLocIds.has(l._id) &&
+    typeof l.lat === 'number' && typeof l.lng === 'number');
+  const entries = [];
+  for (const l of locs) {
+    const poly = await getLocationPolygon(l);
+    if (poly) entries.push({ id: l._id, poly });
+  }
+  if (myToken !== borderCalcToken) return; // a newer recompute superseded us
+  // Clear prior flags for this type before re-flagging
+  locations.filter(l => l.typeId === typeId).forEach(l => borderImpactingIds.delete(l._id));
+  if (entries.length) {
+    const fullArea = turf.area(unionAll(entries.map(e => e.poly)));
+    const thresh = Math.max(1, fullArea * 1e-4); // ignore floating-point slivers
+    entries.forEach((e, i) => {
+      const others = entries.filter((_, j) => j !== i).map(x => x.poly);
+      const otherArea = others.length ? turf.area(unionAll(others)) : 0;
+      if (fullArea - otherArea > thresh) borderImpactingIds.add(e.id);
+    });
+  }
+  if (myToken !== borderCalcToken) return;
   renderTypeLegend();
 }
 
@@ -964,6 +1004,9 @@ function toggleLocExcluded(id) {
   renderTypeLegend();
   renderPins();
   renderCoverage();
+  // Excluding/including shifts which remaining locations sit on the border
+  const loc = locations.find(l => l._id === id);
+  if (loc && expandedTypeIds.has(loc.typeId)) computeBorderImpacting(loc.typeId);
 }
 
 function loadExcluded() {
@@ -1020,11 +1063,17 @@ function renderTypeLegend() {
     const expanded = expandedTypeIds.has(t._id);
     const visChecked = !hiddenTypeIds.has(t._id);
     const sublist = locs.length
-      ? locs.map(l => `
+      ? locs.map(l => {
+          const isBorder = borderImpactingIds.has(l._id) && !excludedLocIds.has(l._id);
+          const dot = isBorder
+            ? `<span class="border-dot" style="background:${t.color}" title="Border location — excluding this shrinks overall ${t.name} coverage"></span>`
+            : '';
+          return `
         <label class="legend-locrow" title="${l.name}">
           <input type="checkbox" ${excludedLocIds.has(l._id) ? '' : 'checked'} onchange="toggleLocExcluded('${l._id}')">
-          <span>${l.name}</span>
-        </label>`).join('')
+          <span>${l.name}</span>${dot}
+        </label>`;
+        }).join('')
       : '<div class="hint" style="padding:2px 4px">No locations yet</div>';
     return `
     <div class="legend-type">
