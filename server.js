@@ -230,8 +230,23 @@ function resolveOrsTarget(settings) {
 // share the same cap reuse one ORS call. Cache key is versioned (v4) and
 // includes the data source so switching servers/limits never serves a stale
 // shape from the previous source.
+// A true isochrone for a given coordinate + drive time is the same shape no
+// matter which ORS engine computed it. The public API can only ever produce
+// shapes up to its hard cap (ORS_DEFAULT_MAX_MINUTES), so for any range at or
+// below that cap we file the entry under a single source-agnostic "shared"
+// scope. That lets a coverage bubble generated on a self-hosted server be
+// reused when the user later switches to the public API (and vice versa)
+// instead of being recomputed — the whole point of the persistent cache.
+//
+// Above the cap only a self-hosted engine can produce a real shape, and two
+// different self-hosted graphs could legitimately differ, so there we keep the
+// source in the key to avoid one server serving another's shape.
+const ISO_SHARED_SCOPE = 'shared';
+function isoCacheScope(source, minutes) {
+  return minutes <= ORS_DEFAULT_MAX_MINUTES ? ISO_SHARED_SCOPE : source;
+}
 function isoCacheKey(source, lat, lng, minutes) {
-  return `v4:${source}:${Number(lat).toFixed(5)},${Number(lng).toFixed(5)},${minutes}`;
+  return `v4:${isoCacheScope(source, minutes)}:${Number(lat).toFixed(5)},${Number(lng).toFixed(5)},${minutes}`;
 }
 // A geometry is only useful if it actually has coordinates to draw. A null or
 // empty geometry can sneak into the cache when ORS returns a Feature with no
@@ -250,6 +265,37 @@ function isoCacheGet(key) {
 }
 function isoCacheSet(key, geojson) {
   db.isochroneCache.update({ key }, { key, geojson, createdAt: Date.now() }, { upsert: true });
+}
+function escapeRegExp(s) {
+  return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+// Find a cached shape for this coordinate+range stored under ANY scope. Cache
+// keys end in ":<lat>,<lng>,<minutes>", so a suffix match locates an entry no
+// matter which source (or the shared scope) wrote it. Used only for ranges
+// within the API cap, where every source's shape is interchangeable, so we can
+// reuse e.g. a self-hosted entry while running against the public API — and
+// pull forward older v-prefixed/per-source keys without a recompute.
+function isoCacheGetBySuffix(lat, lng, minutes) {
+  const suffix = `:${Number(lat).toFixed(5)},${Number(lng).toFixed(5)},${minutes}`;
+  const re = new RegExp(escapeRegExp(suffix) + '$');
+  return new Promise(resolve => db.isochroneCache.findOne({ key: re }, (err, doc) => resolve(err ? null : doc)));
+}
+// Resolve a usable cached geometry for source+coord+range, or null. Prefers an
+// exact key hit; for shareable ranges it falls back to any-source match and
+// migrates the result onto the canonical (shared) key so later lookups are
+// direct hits.
+async function isoCacheResolve(source, lat, lng, minutes) {
+  const key = isoCacheKey(source, lat, lng, minutes);
+  const exact = await isoCacheGet(key);
+  if (exact && hasDrawableGeometry(exact.geojson)) return exact.geojson;
+  if (minutes <= ORS_DEFAULT_MAX_MINUTES) {
+    const any = await isoCacheGetBySuffix(lat, lng, minutes);
+    if (any && hasDrawableGeometry(any.geojson)) {
+      if (any.key !== key) isoCacheSet(key, any.geojson);  // migrate forward
+      return any.geojson;
+    }
+  }
+  return null;
 }
 
 // ─── ORS settings endpoints (read/save/test from the Configure tab) ──
@@ -315,11 +361,13 @@ app.post('/api/isochrone', async (req, res) => {
   const extendMinutes = Math.max(0, minutes - cappedMin);
   const rawKey = isoCacheKey(target.source, lat, lng, cappedMin);
 
-  // 1. Serve the capped isochrone straight from cache when possible.
+  // 1. Serve the capped isochrone straight from cache when possible. For ranges
+  //    within the API cap this also reuses a shape cached under another source
+  //    (e.g. one generated on a self-hosted server while now on the API).
   if (!force) {
-    const cached = await isoCacheGet(rawKey);
-    if (cached && hasDrawableGeometry(cached.geojson)) {
-      return res.json({ type: 'isochrone', geojson: cached.geojson, extendMinutes, cached: true });
+    const cachedGeo = await isoCacheResolve(target.source, lat, lng, cappedMin);
+    if (cachedGeo) {
+      return res.json({ type: 'isochrone', geojson: cachedGeo, extendMinutes, cached: true });
     }
   }
 
