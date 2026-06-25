@@ -204,6 +204,7 @@
     .excl-badge { font-size: 0.6rem; font-weight: 700; }
     .legend-sublist { display: flex; flex-direction: column; gap: 2px; margin: 2px 0 4px 20px; padding-left: 6px; border-left: 1px solid var(--border); }
     .legend-locrow { display: flex; align-items: center; gap: 6px; font-size: 0.76rem; color: var(--text2); cursor: pointer; padding: 1px 0; }
+    .legend-locrow:hover { color: var(--text); background: var(--surface2); border-radius: 4px; }
     .legend-locrow input { accent-color: var(--accent); flex-shrink: 0; }
     .legend-locrow span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .border-dot { width: 9px; height: 9px; border-radius: 50%; margin-left: auto; flex-shrink: 0; box-shadow: 0 0 0 1px rgba(0,0,0,0.35); }
@@ -548,7 +549,10 @@
 // ══════════════════════════════════
 // STATE
 // ══════════════════════════════════
-let map, coverageLayer, pinLayer, projectPinLayer, projectBubbleLayer;
+let map, coverageLayer, pinLayer, projectPinLayer, projectBubbleLayer, highlightLayer;
+// Guards hover-highlight draws: an async polygon fetch is discarded if the
+// pointer has since left the row (or moved to another one).
+let highlightToken = 0;
 let pinDropMode = false;
 let bubbleToken = 0;
 let locationTypes = [];
@@ -723,6 +727,9 @@ function initMap() {
   projectBubbleLayer = L.layerGroup().addTo(map);
   pinLayer = L.layerGroup().addTo(map);
   projectPinLayer = L.layerGroup().addTo(map);
+  // Added last so its paths sit on top of the coverage bubbles. Used to flash a
+  // single location's territory when its name is hovered in the legend filter.
+  highlightLayer = L.layerGroup().addTo(map);
 
   map.on('click', (e) => {
     // Drop-pin mode: next map click drops a draggable temporary project pin
@@ -1127,6 +1134,9 @@ function renderTypeList() {
 
 function renderTypeLegend() {
   const el = document.getElementById('type-legend');
+  // Rebuilding the list can drop a hovered row without firing mouseleave, which
+  // would otherwise leave a highlight stuck on the map.
+  clearLocationHighlight();
   if (!locationTypes.length) { el.innerHTML = '<span class="hint">No types yet</span>'; return; }
   el.innerHTML = locationTypes.map(t => {
     const locs = locations.filter(l => l.typeId === t._id);
@@ -1140,7 +1150,8 @@ function renderTypeLegend() {
             ? `<span class="border-dot" style="background:${t.color}" title="Border location — excluding this shrinks overall ${t.name} coverage"></span>`
             : '';
           return `
-        <label class="legend-locrow" title="${l.name}">
+        <label class="legend-locrow" title="${l.name}"
+               onmouseenter="highlightLocation('${l._id}')" onmouseleave="clearLocationHighlight()">
           <input type="checkbox" ${excludedLocIds.has(l._id) ? '' : 'checked'} onchange="toggleLocExcluded('${l._id}')">
           <span>${l.name}</span>${dot}
         </label>`;
@@ -1163,6 +1174,29 @@ function renderTypeLegend() {
       <div class="legend-sublist" style="display:${expanded ? 'flex' : 'none'}">${sublist}</div>
     </div>`;
   }).join('');
+}
+
+// Flash a single location's territory bubble on the map (called when its name is
+// hovered in the legend filter list). Drawn as a bright casing + a crisp inner
+// outline so it stands out above the merged coverage shapes. The polygon comes
+// from the cache when available, otherwise it's fetched on demand.
+async function highlightLocation(locId) {
+  const myToken = ++highlightToken;
+  const l = locations.find(x => x._id === locId);
+  if (!l || !highlightLayer) return;
+  const type = locationTypes.find(t => t._id === l.typeId);
+  const poly = await getLocationPolygon(l);
+  // Pointer left this row (or moved to another) while the polygon was loading.
+  if (!poly || myToken !== highlightToken) return;
+  highlightLayer.clearLayers();
+  const color = (type && type.color) || '#ffffff';
+  L.geoJSON(poly, { interactive: false, style: { color: '#fff', weight: 7, opacity: 0.55, fill: false } }).addTo(highlightLayer);
+  L.geoJSON(poly, { interactive: false, style: { color, weight: 3, opacity: 1, fillColor: color, fillOpacity: 0.3, dashArray: null } }).addTo(highlightLayer);
+}
+
+function clearLocationHighlight() {
+  highlightToken++;   // cancel any in-flight highlight draw
+  if (highlightLayer) highlightLayer.clearLayers();
 }
 
 async function addLocationType() {
