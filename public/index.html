@@ -177,6 +177,30 @@
       box-shadow: 0 2px 8px rgba(0,0,0,0.35);
     }
     .mc-reopen-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+    /* ── LOCATION INFO PANEL (opens on the left when a pin is clicked) ── */
+    #loc-info-panel {
+      position: absolute; top: 12px; left: 12px; z-index: 810;
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 12px 14px; width: 250px;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+      max-height: calc(100% - 24px); overflow-y: auto;
+      font-size: 0.8rem;
+    }
+    .li-header { display: flex; align-items: center; gap: 7px; }
+    .li-dot { width: 11px; height: 11px; border-radius: 50%; flex-shrink: 0; box-shadow: 0 0 0 1px rgba(0,0,0,0.35); }
+    .li-name { font-weight: 700; font-size: 0.92rem; flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .li-close { background: none; border: none; color: var(--text2); cursor: pointer; font-size: 0.95rem; line-height: 1; padding: 2px 4px; border-radius: 6px; flex-shrink: 0; }
+    .li-close:hover { color: var(--danger); background: var(--surface2); }
+    .li-type { font-size: 0.74rem; color: var(--text2); margin: 1px 0 8px 18px; }
+    .li-row { display: flex; justify-content: space-between; gap: 10px; padding: 4px 0; border-top: 1px solid var(--border); }
+    .li-label { color: var(--text2); flex-shrink: 0; }
+    .li-val { text-align: right; font-weight: 600; word-break: break-word; }
+    .li-pct { color: var(--text2); font-weight: 400; }
+    .li-exclusive { margin-top: 4px; padding: 4px 6px; border: 1px solid var(--border); border-radius: 6px; cursor: help; transition: border-color 0.15s, background 0.15s; }
+    .li-exclusive:hover { border-color: var(--accent); background: var(--surface2); }
+    .li-exclusive .li-row { border-top: none; padding: 0; }
+    .li-hint { font-size: 0.68rem; color: var(--text2); margin-top: 2px; }
     .map-ctrl-row { display: flex; align-items: center; gap: 8px; font-size: 0.8rem; }
     .map-ctrl-row label { flex: 1; }
     .toggle-switch { position: relative; width: 36px; height: 20px; }
@@ -451,6 +475,9 @@
 
   <button class="mc-reopen-btn" id="mc-reopen-btn" onclick="toggleCoveragePane()" title="Show coverage panel" style="display:none">☰ Coverage</button>
 
+  <!-- Slides in on the left when a location pin is clicked -->
+  <div id="loc-info-panel" style="display:none"></div>
+
   <div class="map-controls" id="map-controls">
     <div class="mc-header">
       <h3>Coverage Display</h3>
@@ -549,10 +576,15 @@
 // ══════════════════════════════════
 // STATE
 // ══════════════════════════════════
-let map, coverageLayer, pinLayer, projectPinLayer, projectBubbleLayer, highlightLayer;
+let map, coverageLayer, pinLayer, projectPinLayer, projectBubbleLayer, highlightLayer, selectionLayer;
 // Guards hover-highlight draws: an async polygon fetch is discarded if the
 // pointer has since left the row (or moved to another one).
 let highlightToken = 0;
+// The location whose info panel is open (its territory stays highlighted), the
+// exclusive-area polygon for its hover effect, and a guard for async info loads.
+let selectedLocId = null;
+let selectedExclusivePoly = null;
+let infoToken = 0;
 let pinDropMode = false;
 let bubbleToken = 0;
 let locationTypes = [];
@@ -727,8 +759,9 @@ function initMap() {
   projectBubbleLayer = L.layerGroup().addTo(map);
   pinLayer = L.layerGroup().addTo(map);
   projectPinLayer = L.layerGroup().addTo(map);
-  // Added last so its paths sit on top of the coverage bubbles. Used to flash a
-  // single location's territory when its name is hovered in the legend filter.
+  // selectionLayer holds the persistent territory outline of a clicked location;
+  // highlightLayer (added last, so on top) holds the transient hover flashes.
+  selectionLayer = L.layerGroup().addTo(map);
   highlightLayer = L.layerGroup().addTo(map);
 
   map.on('click', (e) => {
@@ -1105,6 +1138,8 @@ function applyVisibility() {
 // TABS
 // ══════════════════════════════════
 function switchTab(tab) {
+  // The info panel lives on the map; close it (and drop its highlight) on leave.
+  if (tab !== 'map') closeLocationInfo();
   document.querySelectorAll('.tab-btn').forEach((b,i) => b.classList.toggle('active', ['map','config'][i] === tab));
   document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
   document.getElementById('panel-' + tab).classList.add('active');
@@ -1181,6 +1216,9 @@ function renderTypeLegend() {
 // outline so it stands out above the merged coverage shapes. The polygon comes
 // from the cache when available, otherwise it's fetched on demand.
 async function highlightLocation(locId) {
+  // The selected location already shows a persistent outline — skip the
+  // transient flash so its dashed selection doesn't flicker to solid.
+  if (locId === selectedLocId) return;
   const myToken = ++highlightToken;
   const l = locations.find(x => x._id === locId);
   if (!l || !highlightLayer) return;
@@ -1197,6 +1235,120 @@ async function highlightLocation(locId) {
 function clearLocationHighlight() {
   highlightToken++;   // cancel any in-flight highlight draw
   if (highlightLayer) highlightLayer.clearLayers();
+}
+
+// ══════════════════════════════════
+// LOCATION INFO PANEL (click a pin)
+// ══════════════════════════════════
+const SQM_PER_SQMI = 2589988.110336;
+function fmtArea(m2) {
+  if (!m2 || m2 <= 0) return '0 sq mi';
+  const mi2 = m2 / SQM_PER_SQMI;
+  return (mi2 < 10 ? mi2.toFixed(1) : Math.round(mi2).toLocaleString()) + ' sq mi';
+}
+
+// Human-readable coverage radius for a location (its override, else type default)
+function describeRadius(l, type) {
+  if (l.customRadius) return `${l.customRadius} ${l.customRadiusUnit || 'minutes'}`;
+  if (type) return `${type.defaultRadius} ${type.defaultRadiusUnit || 'minutes'}`;
+  return '—';
+}
+
+// Total coverage polygon for a location plus the portion of it that no OTHER
+// visible, non-excluded location of the same type covers — i.e. the area that
+// belongs specifically to this location.
+async function computeLocationCoverage(l) {
+  const mine = await getLocationPolygon(l);
+  if (!mine) return null;
+  const visible = getVisibleTypeIds();
+  const peers = locations.filter(o => o._id !== l._id && o.typeId === l.typeId &&
+    !excludedLocIds.has(o._id) && visible.has(o.typeId));
+  let others = null;
+  for (const o of peers) others = safeUnion(others, await getLocationPolygon(o));
+  let exclusive = mine;
+  if (others) { try { exclusive = turf.difference(mine, others); } catch (e) { exclusive = null; } }
+  return { mine, exclusive, totalArea: turf.area(mine), exclusiveArea: exclusive ? turf.area(exclusive) : 0 };
+}
+
+// Persistent dashed outline of the selected location's full territory.
+function drawSelectionHighlight(l, type) {
+  if (!selectionLayer) return;
+  selectionLayer.clearLayers();
+  const color = (type && type.color) || '#ffffff';
+  getLocationPolygon(l).then(poly => {
+    if (!poly || selectedLocId !== l._id) return;
+    selectionLayer.clearLayers();
+    L.geoJSON(poly, { interactive: false, style: { color: '#fff', weight: 6, opacity: 0.5, fill: false } }).addTo(selectionLayer);
+    L.geoJSON(poly, { interactive: false, style: { color, weight: 3, opacity: 1, fillColor: color, fillOpacity: 0.12, dashArray: '8 5' } }).addTo(selectionLayer);
+  });
+}
+
+function infoPanelHtml(l, type, radiusLabel, totalArea, exclusiveArea, pct) {
+  const color = (type && type.color) || '#888';
+  const typeName = type ? escapeHtml(type.name) : 'Unknown type';
+  const addr = l.address ? escapeHtml(l.address) : `${(+l.lat).toFixed(4)}, ${(+l.lng).toFixed(4)}`;
+  const pctLabel = pct == null ? '' : ` <span class="li-pct">(${pct}% of total)</span>`;
+  return `
+    <div class="li-header">
+      <span class="li-dot" style="background:${color}"></span>
+      <span class="li-name" title="${escapeHtml(l.name)}">${escapeHtml(l.name)}</span>
+      <button class="li-close" onclick="closeLocationInfo()" title="Close">✕</button>
+    </div>
+    <div class="li-type">${typeName}</div>
+    <div class="li-row"><span class="li-label">Address</span><span class="li-val">${addr}</span></div>
+    <div class="li-row"><span class="li-label">Coverage radius</span><span class="li-val">${escapeHtml(radiusLabel)}</span></div>
+    <div class="li-row"><span class="li-label">Total coverage</span><span class="li-val">${totalArea}</span></div>
+    <div class="li-exclusive" onmouseenter="highlightExclusive()" onmouseleave="clearLocationHighlight()">
+      <div class="li-row"><span class="li-label">Unique to this location</span><span class="li-val">${exclusiveArea}${pctLabel}</span></div>
+      <div class="li-hint">↳ hover to highlight this portion</div>
+    </div>`;
+}
+
+// Open the side panel for a clicked location: highlight its territory and show
+// its address, coverage radius, total coverage area and the area unique to it.
+async function openLocationInfo(locId) {
+  const myToken = ++infoToken;
+  const l = locations.find(x => x._id === locId);
+  if (!l) return;
+  const type = locationTypes.find(t => t._id === l.typeId);
+  selectedLocId = locId;
+  selectedExclusivePoly = null;
+  clearLocationHighlight();
+  drawSelectionHighlight(l, type);
+
+  const panel = document.getElementById('loc-info-panel');
+  const radiusLabel = describeRadius(l, type);
+  panel.style.display = 'block';
+  panel.innerHTML = infoPanelHtml(l, type, radiusLabel, '…', '…', null);
+
+  const cov = await computeLocationCoverage(l);
+  // A newer click (or a close) superseded this load.
+  if (myToken !== infoToken || selectedLocId !== locId) return;
+  if (!cov) { panel.innerHTML = infoPanelHtml(l, type, radiusLabel, 'n/a', 'n/a', null); return; }
+  selectedExclusivePoly = cov.exclusive;
+  const pct = cov.totalArea > 0 ? Math.round(cov.exclusiveArea / cov.totalArea * 100) : 0;
+  panel.innerHTML = infoPanelHtml(l, type, radiusLabel, fmtArea(cov.totalArea), fmtArea(cov.exclusiveArea), pct);
+}
+
+// Flash just the exclusive portion when its row is hovered in the panel.
+function highlightExclusive() {
+  if (!selectedExclusivePoly || !highlightLayer) return;
+  highlightToken++;
+  highlightLayer.clearLayers();
+  const l = locations.find(x => x._id === selectedLocId);
+  const type = l && locationTypes.find(t => t._id === l.typeId);
+  const color = (type && type.color) || '#ffffff';
+  L.geoJSON(selectedExclusivePoly, { interactive: false, style: { color: '#fff', weight: 6, opacity: 0.6, fillColor: color, fillOpacity: 0.55 } }).addTo(highlightLayer);
+}
+
+function closeLocationInfo() {
+  selectedLocId = null;
+  selectedExclusivePoly = null;
+  infoToken++;   // cancel any in-flight info load
+  if (selectionLayer) selectionLayer.clearLayers();
+  clearLocationHighlight();
+  const panel = document.getElementById('loc-info-panel');
+  if (panel) panel.style.display = 'none';
 }
 
 async function addLocationType() {
@@ -1498,6 +1650,9 @@ function renderPins() {
       });
       const marker = L.marker([l.lat, l.lng], { icon })
         .bindTooltip(`<b>${l.name}</b><br><span style="color:#888">${type.name}${excluded ? ' · excluded' : ''}</span>`, { permanent: false, direction: 'top', offset: [0, -8] })
+        .on('mouseover', () => highlightLocation(l._id))
+        .on('mouseout', () => clearLocationHighlight())
+        .on('click', () => openLocationInfo(l._id))
         .addTo(pinLayer);
     });
   });
