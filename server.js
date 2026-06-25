@@ -140,13 +140,40 @@ app.delete('/api/locations/:id', (req, res) => {
 });
 
 // ─── Geocoding proxy ───────────────────────────────────────────────
+// Recognise a raw "lat, lng" (or "lat lng") pair — e.g. coordinates copied
+// from Google Maps — so the caller can resolve them without a lookup.
+function parseLatLng(s) {
+  if (!s) return null;
+  const m = String(s).trim().match(/^\(?\s*(-?\d{1,3}(?:\.\d+)?)\s*[, ]\s*(-?\d{1,3}(?:\.\d+)?)\s*\)?$/);
+  if (!m) return null;
+  const lat = parseFloat(m[1]), lng = parseFloat(m[2]);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+  if (lat < -90 || lat > 90 || lng < -180 || lng > 180) return null;
+  return { lat, lng };
+}
+
 app.get('/api/geocode', async (req, res) => {
   const { q } = req.query;
   if (!q) return res.status(400).json({ error: 'query required' });
-  try {
-    const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(q)}&limit=5&countrycodes=us`;
+
+  // Pasted coordinates resolve directly — skip the address lookup entirely.
+  const coords = parseLatLng(q);
+  if (coords) {
+    return res.json([{ display_name: `📍 ${coords.lat.toFixed(6)}, ${coords.lng.toFixed(6)}`, lat: coords.lat, lng: coords.lng }]);
+  }
+
+  const lookup = async (extra) => {
+    const url = `https://nominatim.openstreetmap.org/search?format=json&addressdetails=1&dedupe=1&limit=8&q=${encodeURIComponent(q)}${extra}`;
     const r = await fetch(url, { headers: { 'User-Agent': 'ProjectSecretWishes/1.0' } });
     const data = await r.json();
+    return Array.isArray(data) ? data : [];
+  };
+
+  try {
+    // Prefer US results, but broaden the search if the restricted query finds
+    // nothing — many specific addresses only surface without the country filter.
+    let data = await lookup('&countrycodes=us');
+    if (!data.length) data = await lookup('');
     res.json(data.map(d => ({ display_name: d.display_name, lat: parseFloat(d.lat), lng: parseFloat(d.lon) })));
   } catch (e) {
     res.status(500).json({ error: e.message });
