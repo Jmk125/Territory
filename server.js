@@ -41,6 +41,31 @@ app.get('/api/config', (req, res) => {
 });
 
 // ─── Location Types ────────────────────────────────────────────────
+// Per-type bubble drawing style. Stored on the type so coverage shapes for
+// every location of that type render consistently across all view modes.
+const LINE_STYLES = ['solid', 'dashed', 'dotted', 'dashdot'];
+const FILL_PATTERNS = ['solid', 'none', 'stripes', 'crosshatch', 'dots', 'grid'];
+const TYPE_STYLE_DEFAULTS = { lineWeight: 2, lineStyle: 'solid', lineOpacity: 0.8, fillPattern: 'solid', fillOpacity: 0.28 };
+
+function clampNum(n, min, max, fallback) {
+  const v = Number(n);
+  if (!Number.isFinite(v)) return fallback;
+  return Math.min(max, Math.max(min, v));
+}
+
+// Pull only the recognised style fields from a request body, coercing/validating
+// each one. Returns just the keys that were actually supplied so PUT can patch
+// without wiping fields the caller didn't send.
+function sanitizeTypeStyle(b) {
+  const out = {};
+  if (b.lineWeight != null)  out.lineWeight  = clampNum(b.lineWeight, 0, 12, TYPE_STYLE_DEFAULTS.lineWeight);
+  if (b.lineStyle != null)   out.lineStyle   = LINE_STYLES.includes(b.lineStyle) ? b.lineStyle : TYPE_STYLE_DEFAULTS.lineStyle;
+  if (b.lineOpacity != null) out.lineOpacity = clampNum(b.lineOpacity, 0, 1, TYPE_STYLE_DEFAULTS.lineOpacity);
+  if (b.fillPattern != null) out.fillPattern = FILL_PATTERNS.includes(b.fillPattern) ? b.fillPattern : TYPE_STYLE_DEFAULTS.fillPattern;
+  if (b.fillOpacity != null) out.fillOpacity = clampNum(b.fillOpacity, 0, 1, TYPE_STYLE_DEFAULTS.fillOpacity);
+  return out;
+}
+
 app.get('/api/location-types', (req, res) => {
   db.locationTypes.find({}).sort({ createdAt: 1 }).exec((err, docs) => {
     if (err) return res.status(500).json({ error: err.message });
@@ -51,7 +76,8 @@ app.get('/api/location-types', (req, res) => {
 app.post('/api/location-types', (req, res) => {
   const { name, color, defaultRadius, defaultRadiusUnit } = req.body;
   if (!name || !color) return res.status(400).json({ error: 'name and color required' });
-  const doc = { name, color, defaultRadius: defaultRadius || 60, defaultRadiusUnit: defaultRadiusUnit || 'minutes', createdAt: Date.now() };
+  const doc = { name, color, defaultRadius: defaultRadius || 60, defaultRadiusUnit: defaultRadiusUnit || 'minutes',
+    ...TYPE_STYLE_DEFAULTS, ...sanitizeTypeStyle(req.body), createdAt: Date.now() };
   db.locationTypes.insert(doc, (err, newDoc) => {
     if (err) return res.status(500).json({ error: err.message });
     res.json(newDoc);
@@ -60,7 +86,8 @@ app.post('/api/location-types', (req, res) => {
 
 app.put('/api/location-types/:id', (req, res) => {
   const { name, color, defaultRadius, defaultRadiusUnit } = req.body;
-  db.locationTypes.update({ _id: req.params.id }, { $set: { name, color, defaultRadius, defaultRadiusUnit } }, {}, (err) => {
+  const set = { name, color, defaultRadius, defaultRadiusUnit, ...sanitizeTypeStyle(req.body) };
+  db.locationTypes.update({ _id: req.params.id }, { $set: set }, {}, (err) => {
     if (err) return res.status(500).json({ error: err.message });
     db.locationTypes.findOne({ _id: req.params.id }, (err2, doc) => res.json(doc));
   });

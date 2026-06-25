@@ -343,6 +343,20 @@
 
     .hint { font-size: 0.72rem; color: var(--text2); }
 
+    /* ── BUBBLE STYLE CONTROLS ── */
+    .style-controls { margin-top: 8px; }
+    .style-controls.boxed { border: 1px solid var(--border); border-radius: var(--radius); padding: 10px; background: var(--surface2); }
+    details.style-details { margin-top: 8px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface2); }
+    details.style-details > summary { cursor: pointer; padding: 7px 10px; font-size: 0.72rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text2); list-style: none; user-select: none; }
+    details.style-details > summary::-webkit-details-marker { display: none; }
+    details.style-details > summary::before { content: '▸ '; color: var(--text2); }
+    details.style-details[open] > summary::before { content: '▾ '; }
+    details.style-details > .style-controls { padding: 0 10px 10px; margin-top: 0; }
+    .style-controls input[type=range] { width: 100%; accent-color: var(--accent); }
+    .style-controls select { padding: 8px 6px; }
+    .style-controls .style-preview { width: 100%; height: 44px; border-radius: 6px; background: var(--surface); display: block; }
+    .style-controls .val-badge { font-weight: 700; color: var(--text); }
+
     /* ── PROJECT PINS ── */
     .project-pin-list { display: flex; flex-direction: column; gap: 4px; max-height: 220px; overflow-y: auto; }
     .ppin-item { display: flex; flex-direction: column; align-items: stretch; gap: 5px; font-size: 0.78rem; background: var(--surface2); border: 1px solid var(--border); border-radius: var(--radius); padding: 5px 6px; }
@@ -508,9 +522,10 @@
         </div>
         <div>
           <label class="field-label">Color</label>
-          <input type="color" id="new-type-color" value="#4f8ef7" />
+          <input type="color" id="new-type-color" value="#4f8ef7" oninput="updateStylePreview('nt')" />
         </div>
       </div>
+      <div id="nt-style-host"></div>
       <button class="btn btn-success btn-sm" onclick="addLocationType()">+ Add Type</button>
     </div>
   </div>
@@ -575,6 +590,15 @@ let coverageToken = 0;
 // INIT
 // ══════════════════════════════════
 async function init() {
+  // Populate the "New Type" bubble-style controls (collapsed to keep the
+  // sidebar form compact) and draw their initial preview.
+  const ntHost = document.getElementById('nt-style-host');
+  if (ntHost) {
+    ntHost.innerHTML = `<details class="style-details" ontoggle="updateStylePreview('nt')"><summary>Bubble style</summary>
+      <div class="style-controls">${styleControlsHtml('nt', 'new-type-color')}</div></details>`;
+    updateStylePreview('nt');
+  }
+
   const cfg = await fetch('/api/config').then(r => r.json());
   hasOrsKey = cfg.hasOrsKey;
   await refreshOrsStatus();
@@ -1147,7 +1171,8 @@ async function addLocationType() {
   const radius = parseInt(document.getElementById('new-type-radius').value) || 60;
   const unit = document.getElementById('new-type-unit').value;
   if (!name) { alert('Please enter a type name.'); return; }
-  await fetch('/api/location-types', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ name, color, defaultRadius: radius, defaultRadiusUnit: unit }) });
+  const style = readStyleInputs('nt');
+  await fetch('/api/location-types', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ name, color, defaultRadius: radius, defaultRadiusUnit: unit, ...stylePayload(style) }) });
   document.getElementById('new-type-name').value = '';
   document.getElementById('new-type-radius').value = '';
   await loadAll();
@@ -1183,13 +1208,16 @@ function editLocationType(id) {
       </div>
       <div>
         <label class="field-label">Color</label>
-        <input type="color" id="et-color" value="${t.color}" />
+        <input type="color" id="et-color" value="${t.color}" oninput="updateStylePreview('et')" />
       </div>
     </div>
+    <div class="section-divider" style="margin-top:16px">Bubble Style</div>
+    <div class="style-controls boxed">${styleControlsHtml('et', 'et-color', t)}</div>
     <div class="row" style="margin-top:18px; gap:8px">
       <button class="btn btn-success" onclick="saveLocationType('${id}')">💾 Save Changes</button>
       <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
     </div>`);
+  updateStylePreview('et');
 }
 
 async function saveLocationType(id) {
@@ -1200,9 +1228,10 @@ async function saveLocationType(id) {
   const defaultRadius = parseInt(document.getElementById('et-radius').value) || t.defaultRadius;
   const defaultRadiusUnit = document.getElementById('et-unit').value;
   if (!name) { alert('Name is required.'); return; }
+  const style = readStyleInputs('et');
   await fetch(`/api/location-types/${id}`, {
     method: 'PUT', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name, color, defaultRadius, defaultRadiusUnit })
+    body: JSON.stringify({ name, color, defaultRadius, defaultRadiusUnit, ...stylePayload(style) })
   });
   closeModal();
   await loadAll();
@@ -1868,6 +1897,192 @@ function updateApproxNote(items) {
   if (any) note.textContent = `≈ Coverage beyond ${orsMaxMinutes} min is approximate`;
 }
 
+// ══════════════════════════════════
+// PER-TYPE BUBBLE STYLE
+// ══════════════════════════════════
+// Each location type carries its own bubble drawing style (border width/style/
+// opacity and fill pattern/opacity). These helpers turn those stored fields into
+// Leaflet path options and SVG fill patterns, and power the live previews in the
+// type add/edit forms.
+const LINE_STYLE_OPTS = [['solid', 'Solid'], ['dashed', 'Dashed'], ['dotted', 'Dotted'], ['dashdot', 'Dash-dot']];
+const FILL_PATTERN_OPTS = [['solid', 'Solid'], ['none', 'None (outline only)'], ['stripes', 'Stripes'], ['crosshatch', 'Crosshatch'], ['dots', 'Dots'], ['grid', 'Grid']];
+const STYLE_DEFAULTS = { lineWeight: 2, lineStyle: 'solid', lineOpacity: 0.8, fillPattern: 'solid', fillOpacity: 0.28 };
+
+// Maps a style prefix (e.g. 'nt', 'et') to the id of the color <input> that
+// feeds its preview, so the controls don't have to duplicate a color picker.
+const stylePreviewColorInput = {};
+
+function dashArrayFor(style) {
+  return { solid: '', dashed: '8 6', dotted: '1.5 5', dashdot: '12 6 2 6' }[style] || '';
+}
+
+// Translate a type's stored style fields into Leaflet path options. A zero
+// border width disables the stroke entirely (no hairline) so "thickness 0"
+// truly means "no border".
+function typeBubbleStyle(type) {
+  const weight = type.lineWeight == null ? STYLE_DEFAULTS.lineWeight : Number(type.lineWeight);
+  const fillPattern = type.fillPattern || 'solid';
+  const fillOpacity = fillPattern === 'none' ? 0 : (type.fillOpacity == null ? STYLE_DEFAULTS.fillOpacity : Number(type.fillOpacity));
+  const lineOpacity = type.lineOpacity == null ? STYLE_DEFAULTS.lineOpacity : Number(type.lineOpacity);
+  const dash = dashArrayFor(type.lineStyle || 'solid');
+  return {
+    color: type.color,
+    fillColor: type.color,
+    fill: fillOpacity > 0 || fillPattern !== 'none',
+    fillOpacity,
+    stroke: weight > 0,
+    weight,
+    opacity: lineOpacity,
+    dashArray: dash || null
+  };
+}
+
+function svgPatternId(pattern, color, scope) {
+  return `covpat-${scope}-${pattern}-${String(color).replace(/[^a-z0-9]/gi, '')}`;
+}
+
+const SVG_NS = 'http://www.w3.org/2000/svg';
+function svgEl(tag, attrs) {
+  const e = document.createElementNS(SVG_NS, tag);
+  for (const k in attrs) e.setAttribute(k, attrs[k]);
+  return e;
+}
+
+// Ensure an SVG <pattern> for (pattern,color) exists inside the given <svg> and
+// return its id. Patterns are tiled in screen pixels (userSpaceOnUse) so they
+// stay a constant visual size regardless of map zoom. The `scope` keeps the map
+// renderer and each preview from colliding on a shared id.
+function ensurePatternDef(svg, pattern, color, scope) {
+  const id = svgPatternId(pattern, color, scope);
+  if (svg.querySelector(`pattern[id="${id}"]`)) return id;
+  let defs = svg.querySelector('defs');
+  if (!defs) { defs = svgEl('defs', {}); svg.insertBefore(defs, svg.firstChild); }
+  const size = 10;
+  const pat = svgEl('pattern', { id, patternUnits: 'userSpaceOnUse', width: size, height: size });
+  if (pattern === 'stripes') {
+    pat.setAttribute('patternTransform', 'rotate(45)');
+    pat.appendChild(svgEl('line', { x1: 0, y1: 0, x2: 0, y2: size, stroke: color, 'stroke-width': 2.5 }));
+  } else if (pattern === 'crosshatch') {
+    pat.appendChild(svgEl('path', { d: `M0,0 l${size},${size} M${size},0 l-${size},${size}`, stroke: color, 'stroke-width': 1.3, fill: 'none' }));
+  } else if (pattern === 'dots') {
+    pat.appendChild(svgEl('circle', { cx: size / 2, cy: size / 2, r: 2, fill: color }));
+  } else if (pattern === 'grid') {
+    pat.appendChild(svgEl('path', { d: `M${size},0 L0,0 0,${size}`, fill: 'none', stroke: color, 'stroke-width': 1 }));
+  }
+  defs.appendChild(pat);
+  return id;
+}
+
+// After a coverage layer is drawn, swap its solid fill for an SVG pattern when
+// the type calls for one. Leaflet sets fill via the `fill` attribute, so a later
+// setAttribute('fill', url(...)) overrides it while its fill-opacity (the type's
+// fillOpacity) still applies to the patterned shape.
+function applyCoveragePattern(layer, type) {
+  const pattern = type.fillPattern || 'solid';
+  if (pattern === 'solid' || pattern === 'none') return;
+  layer.eachLayer(sub => {
+    const el = sub.getElement && sub.getElement();
+    const svg = el && el.ownerSVGElement;
+    if (!svg) return;
+    const id = ensurePatternDef(svg, pattern, type.color, 'map');
+    el.setAttribute('fill', `url(#${id})`);
+  });
+}
+
+// Build the style controls markup for a type form. `prefix` namespaces the input
+// ids (e.g. 'nt' → nt-lw, nt-ls …); `colorInputId` is the existing color picker
+// the preview should read from.
+function styleControlsHtml(prefix, colorInputId, t) {
+  t = t || {};
+  stylePreviewColorInput[prefix] = colorInputId;
+  const lineWeight  = t.lineWeight  == null ? STYLE_DEFAULTS.lineWeight  : t.lineWeight;
+  const lineStyle   = t.lineStyle   || STYLE_DEFAULTS.lineStyle;
+  const lineOpacity = t.lineOpacity == null ? STYLE_DEFAULTS.lineOpacity : t.lineOpacity;
+  const fillPattern = t.fillPattern || STYLE_DEFAULTS.fillPattern;
+  const fillOpacity = t.fillOpacity == null ? STYLE_DEFAULTS.fillOpacity : t.fillOpacity;
+  const opts = (arr, sel) => arr.map(([v, l]) => `<option value="${v}" ${v === sel ? 'selected' : ''}>${l}</option>`).join('');
+  const ev = `oninput="updateStylePreview('${prefix}')"`;
+  return `
+    <div class="row" style="gap:8px">
+      <div style="flex:1">
+        <label class="field-label">Border width <span class="hint">(0 = no border)</span></label>
+        <input type="number" id="${prefix}-lw" min="0" max="12" step="0.5" value="${lineWeight}" ${ev}/>
+      </div>
+      <div style="flex:1">
+        <label class="field-label">Border style</label>
+        <select id="${prefix}-ls" onchange="updateStylePreview('${prefix}')">${opts(LINE_STYLE_OPTS, lineStyle)}</select>
+      </div>
+    </div>
+    <div style="margin-top:8px">
+      <label class="field-label">Border opacity <span class="val-badge" id="${prefix}-lo-val">${(+lineOpacity).toFixed(2)}</span></label>
+      <input type="range" id="${prefix}-lo" min="0" max="1" step="0.05" value="${lineOpacity}" ${ev}/>
+    </div>
+    <div style="margin-top:8px">
+      <label class="field-label">Fill pattern</label>
+      <select id="${prefix}-fp" onchange="updateStylePreview('${prefix}')">${opts(FILL_PATTERN_OPTS, fillPattern)}</select>
+    </div>
+    <div style="margin-top:8px">
+      <label class="field-label">Fill opacity <span class="val-badge" id="${prefix}-fo-val">${(+fillOpacity).toFixed(2)}</span></label>
+      <input type="range" id="${prefix}-fo" min="0" max="1" step="0.05" value="${fillOpacity}" ${ev}/>
+    </div>
+    <div style="margin-top:8px">
+      <label class="field-label">Preview</label>
+      <svg class="style-preview" id="${prefix}-preview"></svg>
+    </div>`;
+}
+
+// Read the current values of a style form's inputs into a plain style object.
+function readStyleInputs(prefix) {
+  const g = id => document.getElementById(prefix + '-' + id);
+  const colorId = stylePreviewColorInput[prefix];
+  const colorEl = colorId && document.getElementById(colorId);
+  return {
+    color: (colorEl && colorEl.value) || '#4f8ef7',
+    lineWeight: parseFloat(g('lw').value) || 0,
+    lineStyle: g('ls').value,
+    lineOpacity: parseFloat(g('lo').value),
+    fillPattern: g('fp').value,
+    fillOpacity: parseFloat(g('fo').value)
+  };
+}
+
+// The subset of readStyleInputs() to persist on a type (color is sent
+// separately via its own field).
+function stylePayload(s) {
+  return { lineWeight: s.lineWeight, lineStyle: s.lineStyle, lineOpacity: s.lineOpacity, fillPattern: s.fillPattern, fillOpacity: s.fillOpacity };
+}
+
+// Redraw the little swatch that previews how a type's bubbles will look.
+function updateStylePreview(prefix) {
+  if (!document.getElementById(prefix + '-preview')) return;
+  const s = readStyleInputs(prefix);
+  const loVal = document.getElementById(prefix + '-lo-val'); if (loVal) loVal.textContent = s.lineOpacity.toFixed(2);
+  const foVal = document.getElementById(prefix + '-fo-val'); if (foVal) foVal.textContent = s.fillOpacity.toFixed(2);
+  const svg = document.getElementById(prefix + '-preview');
+  svg.innerHTML = '';
+  const w = svg.clientWidth || 240, h = 44, pad = 6;
+  const rect = svgEl('rect', { x: pad, y: pad, width: Math.max(0, w - pad * 2), height: h - pad * 2, rx: 6 });
+  if (s.fillPattern === 'none' || s.fillOpacity <= 0) {
+    rect.setAttribute('fill', 'none');
+  } else if (s.fillPattern === 'solid') {
+    rect.setAttribute('fill', s.color);
+    rect.setAttribute('fill-opacity', s.fillOpacity);
+  } else {
+    rect.setAttribute('fill', `url(#${ensurePatternDef(svg, s.fillPattern, s.color, prefix)})`);
+    rect.setAttribute('fill-opacity', s.fillOpacity);
+  }
+  if (s.lineWeight > 0) {
+    rect.setAttribute('stroke', s.color);
+    rect.setAttribute('stroke-width', s.lineWeight);
+    rect.setAttribute('stroke-opacity', s.lineOpacity);
+    const dash = dashArrayFor(s.lineStyle);
+    if (dash) rect.setAttribute('stroke-dasharray', dash);
+  } else {
+    rect.setAttribute('stroke', 'none');
+  }
+  svg.appendChild(rect);
+}
+
 async function renderCoverage() {
   // Each render gets a token; if a newer render starts while we're awaiting
   // isochrones, this stale one bails before drawing (otherwise slow isochrone
@@ -1912,10 +2127,8 @@ async function renderCoverage() {
     // Heat map: draw each location individually — overlaps stack and darken naturally
     Object.values(typeGroups).forEach(({ type, items }) => {
       items.forEach(item => {
-        const poly = item.poly;
-        L.geoJSON(poly, {
-          style: { color: type.color, fillColor: type.color, fillOpacity: 0.22, weight: 1.5, opacity: 0.5 }
-        }).addTo(coverageLayer);
+        const lyr = L.geoJSON(item.poly, { style: typeBubbleStyle(type) }).addTo(coverageLayer);
+        applyCoveragePattern(lyr, type);
       });
     });
 
@@ -1925,9 +2138,8 @@ async function renderCoverage() {
       const polygons = items.map(item => item.poly);
       const merged = unionAll(polygons);
       if (merged) {
-        L.geoJSON(merged, {
-          style: { color: type.color, fillColor: type.color, fillOpacity: 0.28, weight: 2, opacity: 0.7 }
-        }).addTo(coverageLayer);
+        const lyr = L.geoJSON(merged, { style: typeBubbleStyle(type) }).addTo(coverageLayer);
+        applyCoveragePattern(lyr, type);
       }
     });
   }
