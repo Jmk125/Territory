@@ -182,7 +182,7 @@
     #loc-info-panel {
       position: absolute; bottom: 12px; left: 12px; z-index: 810;
       background: var(--surface); border: 1px solid var(--border);
-      border-radius: var(--radius); padding: 12px 14px; width: 250px;
+      border-radius: var(--radius); padding: 12px 14px; width: 500px; max-width: calc(100% - 24px);
       box-shadow: 0 4px 16px rgba(0,0,0,0.4);
       max-height: calc(100% - 24px); overflow-y: auto;
       font-size: 0.8rem;
@@ -1298,7 +1298,7 @@ function infoPanelHtml(l, type, radiusLabel, totalArea, exclusiveArea, pctOfLoc,
   const addr = l.address ? escapeHtml(l.address) : `${(+l.lat).toFixed(4)}, ${(+l.lng).toFixed(4)}`;
   const breakdown = pctOfLoc == null ? '' : `
       <div class="li-hint">↳ ${pctOfLoc}% of this location's coverage</div>
-      <div class="li-hint">↳ ${pctOfType}% of all ${typeName} coverage — lost if removed</div>`;
+      <div class="li-hint">↳ ${pctOfType}% of all ${typeName} coverage</div>`;
   return `
     <div class="li-header">
       <span class="li-dot" style="background:${color}"></span>
