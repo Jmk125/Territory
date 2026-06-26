@@ -81,7 +81,8 @@ app.get('/api/location-types', (req, res) => {
 
 app.post('/api/location-types', (req, res) => {
   const { name, color, defaultRadius, defaultRadiusUnit, layerKind, tabIds,
-          geojsonData, colorByField, colorScaleLow, colorScaleHigh } = req.body;
+          geojsonData, colorByField, colorScaleLow, colorScaleHigh,
+          tooltipNameField, tooltipFields } = req.body;
   if (!name || !color) return res.status(400).json({ error: 'name and color required' });
   const kind = layerKind === 'boundary' ? 'boundary' : 'isochrone';
   const doc = { name, color, layerKind: kind,
@@ -93,6 +94,8 @@ app.post('/api/location-types', (req, res) => {
     doc.colorByField = colorByField || '';
     doc.colorScaleLow = colorScaleLow || '#ffffcc';
     doc.colorScaleHigh = colorScaleHigh || '#800026';
+    doc.tooltipNameField = tooltipNameField || '';
+    doc.tooltipFields = Array.isArray(tooltipFields) ? tooltipFields : [];
   }
   db.locationTypes.insert(doc, (err, newDoc) => {
     if (err) return res.status(500).json({ error: err.message });
@@ -109,6 +112,8 @@ app.put('/api/location-types/:id', (req, res) => {
   if (colorByField !== undefined) set.colorByField = colorByField;
   if (colorScaleLow !== undefined) set.colorScaleLow = colorScaleLow;
   if (colorScaleHigh !== undefined) set.colorScaleHigh = colorScaleHigh;
+  if (req.body.tooltipNameField !== undefined) set.tooltipNameField = req.body.tooltipNameField;
+  if (req.body.tooltipFields !== undefined) set.tooltipFields = Array.isArray(req.body.tooltipFields) ? req.body.tooltipFields : [];
   db.locationTypes.update({ _id: req.params.id }, { $set: set }, {}, (err) => {
     if (err) return res.status(500).json({ error: err.message });
     db.locationTypes.findOne({ _id: req.params.id }, (err2, doc) => res.json(doc));
