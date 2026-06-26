@@ -1326,9 +1326,9 @@ function renderTypeLegend() {
   if (!locationTypes.length) { el.innerHTML = '<span class="hint">No types yet</span>'; return; }
   // Hidden types are controlled from the Configure tab's eye toggle and are
   // omitted from the map view entirely — not just dimmed.
-  const visibleTypes = locationTypes.filter(t => !hiddenTypeIds.has(t._id));
+  const visibleTypes = locationTypes.filter(t => !hiddenTypeIds.has(t._id) && (t.tabIds || ['default']).includes(activeMapTabId));
   if (!visibleTypes.length) {
-    el.innerHTML = '<span class="hint">All types hidden — unhide them in the Configure tab.</span>';
+    el.innerHTML = '<span class="hint">No types on this tab — assign types in the Configure tab.</span>';
     return;
   }
   el.innerHTML = visibleTypes.map(t => {
