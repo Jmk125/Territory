@@ -17,11 +17,17 @@ const db = {
   // Cache of driving durations (source→destination) to avoid repeat key calls.
   travelCache: new Datastore({ filename: path.join(__dirname, 'data/travelCache.db'), autoload: true }),
   // Runtime ORS settings chosen from the UI (which server to call, range limit).
-  settings: new Datastore({ filename: path.join(__dirname, 'data/settings.db'), autoload: true })
+  settings: new Datastore({ filename: path.join(__dirname, 'data/settings.db'), autoload: true }),
+  mapTabs: new Datastore({ filename: path.join(__dirname, 'data/mapTabs.db'), autoload: true })
 };
 
-app.use(express.json());
+app.use(express.json({ limit: '50mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
+
+// Seed the default map tab if it doesn't exist
+db.mapTabs.findOne({ _id: 'default' }, (err, doc) => {
+  if (!doc) db.mapTabs.insert({ _id: 'default', name: 'Default', isDefault: true, order: 0, createdAt: Date.now() });
+});
 
 // ─── Config endpoint ───────────────────────────────────────────────
 // SPLASH_COLOR presets: red (default), mgs (Metal Gear Solid green), blue
@@ -74,10 +80,20 @@ app.get('/api/location-types', (req, res) => {
 });
 
 app.post('/api/location-types', (req, res) => {
-  const { name, color, defaultRadius, defaultRadiusUnit } = req.body;
+  const { name, color, defaultRadius, defaultRadiusUnit, layerKind, tabIds,
+          geojsonData, colorByField, colorScaleLow, colorScaleHigh } = req.body;
   if (!name || !color) return res.status(400).json({ error: 'name and color required' });
-  const doc = { name, color, defaultRadius: defaultRadius || 60, defaultRadiusUnit: defaultRadiusUnit || 'minutes',
+  const kind = layerKind === 'boundary' ? 'boundary' : 'isochrone';
+  const doc = { name, color, layerKind: kind,
+    tabIds: Array.isArray(tabIds) ? tabIds : ['default'],
+    defaultRadius: defaultRadius || 60, defaultRadiusUnit: defaultRadiusUnit || 'minutes',
     ...TYPE_STYLE_DEFAULTS, ...sanitizeTypeStyle(req.body), createdAt: Date.now() };
+  if (kind === 'boundary') {
+    doc.geojsonData = geojsonData || null;
+    doc.colorByField = colorByField || '';
+    doc.colorScaleLow = colorScaleLow || '#ffffcc';
+    doc.colorScaleHigh = colorScaleHigh || '#800026';
+  }
   db.locationTypes.insert(doc, (err, newDoc) => {
     if (err) return res.status(500).json({ error: err.message });
     res.json(newDoc);
@@ -85,8 +101,14 @@ app.post('/api/location-types', (req, res) => {
 });
 
 app.put('/api/location-types/:id', (req, res) => {
-  const { name, color, defaultRadius, defaultRadiusUnit } = req.body;
+  const { name, color, defaultRadius, defaultRadiusUnit, tabIds,
+          geojsonData, colorByField, colorScaleLow, colorScaleHigh } = req.body;
   const set = { name, color, defaultRadius, defaultRadiusUnit, ...sanitizeTypeStyle(req.body) };
+  if (tabIds !== undefined) set.tabIds = Array.isArray(tabIds) ? tabIds : ['default'];
+  if (geojsonData !== undefined) set.geojsonData = geojsonData;
+  if (colorByField !== undefined) set.colorByField = colorByField;
+  if (colorScaleLow !== undefined) set.colorScaleLow = colorScaleLow;
+  if (colorScaleHigh !== undefined) set.colorScaleHigh = colorScaleHigh;
   db.locationTypes.update({ _id: req.params.id }, { $set: set }, {}, (err) => {
     if (err) return res.status(500).json({ error: err.message });
     db.locationTypes.findOne({ _id: req.params.id }, (err2, doc) => res.json(doc));
@@ -526,6 +548,59 @@ app.post('/api/travel-times', async (req, res) => {
 function minutesToMeters(minutes) {
   return Math.round(minutes * 1340);
 }
+
+// ─── Map Tabs ─────────────────────────────────────────────────────
+app.get('/api/map-tabs', (req, res) => {
+  db.mapTabs.find({}).sort({ order: 1, createdAt: 1 }).exec((err, docs) => {
+    if (err) return res.status(500).json({ error: err.message });
+    if (!docs.length) docs = [{ _id: 'default', name: 'Default', isDefault: true, order: 0 }];
+    else if (!docs.some(d => d.isDefault)) {
+      docs.unshift({ _id: 'default', name: 'Default', isDefault: true, order: 0 });
+    }
+    res.json(docs);
+  });
+});
+
+app.post('/api/map-tabs', (req, res) => {
+  const { name } = req.body;
+  if (!name || !name.trim()) return res.status(400).json({ error: 'name required' });
+  const doc = { name: name.trim(), isDefault: false, order: Date.now(), createdAt: Date.now() };
+  db.mapTabs.insert(doc, (err, newDoc) => {
+    if (err) return res.status(500).json({ error: err.message });
+    res.json(newDoc);
+  });
+});
+
+app.put('/api/map-tabs/:id', (req, res) => {
+  const { name } = req.body;
+  if (!name || !name.trim()) return res.status(400).json({ error: 'name required' });
+  db.mapTabs.update({ _id: req.params.id, isDefault: { $ne: true } }, { $set: { name: name.trim() } }, {}, (err) => {
+    if (err) return res.status(500).json({ error: err.message });
+    db.mapTabs.findOne({ _id: req.params.id }, (err2, doc) => res.json(doc));
+  });
+});
+
+app.delete('/api/map-tabs/:id', (req, res) => {
+  db.mapTabs.findOne({ _id: req.params.id }, (err, doc) => {
+    if (err) return res.status(500).json({ error: err.message });
+    if (!doc || doc.isDefault) return res.status(400).json({ error: 'Cannot delete default tab' });
+    db.mapTabs.remove({ _id: req.params.id }, {}, (err2) => {
+      if (err2) return res.status(500).json({ error: err2.message });
+      db.locationTypes.find({}, (err3, types) => {
+        if (types) {
+          types.forEach(t => {
+            if (Array.isArray(t.tabIds) && t.tabIds.includes(req.params.id)) {
+              const newTabIds = t.tabIds.filter(id => id !== req.params.id);
+              if (!newTabIds.length) newTabIds.push('default');
+              db.locationTypes.update({ _id: t._id }, { $set: { tabIds: newTabIds } });
+            }
+          });
+        }
+        res.json({ success: true });
+      });
+    });
+  });
+});
 
 const server = app.listen(PORT, '0.0.0.0', () => {
   console.log(`\n🚨 PROJECT SECRET WISHES 🚨`);
