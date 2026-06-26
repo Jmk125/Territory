@@ -508,9 +508,10 @@
   <button class="tab-btn" onclick="switchTab('config')">⚙ Configure</button>
 </div>
 
+<div class="map-tab-bar" id="map-tab-bar"></div>
+
 <!-- MAP PANEL -->
 <div id="panel-map" class="panel active">
-  <div class="map-tab-bar" id="map-tab-bar"></div>
   <div id="map"></div>
 
   <button class="mc-reopen-btn" id="mc-reopen-btn" onclick="toggleCoveragePane()" title="Show coverage panel" style="display:none">☰ Coverage</button>
@@ -1274,11 +1275,12 @@ function applyVisibility() {
 // TABS
 // ══════════════════════════════════
 function switchTab(tab) {
-  // The info panel lives on the map; close it (and drop its highlight) on leave.
   if (tab !== 'map') closeLocationInfo();
   document.querySelectorAll('.tab-btn').forEach((b,i) => b.classList.toggle('active', ['map','config'][i] === tab));
   document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
   document.getElementById('panel-' + tab).classList.add('active');
+  const mapTabBar = document.getElementById('map-tab-bar');
+  if (mapTabBar) mapTabBar.style.display = tab === 'map' ? 'flex' : 'none';
   if (tab === 'map') setTimeout(() => map.invalidateSize(), 50);
 }
 
