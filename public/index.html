@@ -1040,10 +1040,7 @@ function setTypeHidden(id, hidden) {
   renderTypeLegend();  // keep the legend toggle in sync
 }
 
-// Legend toggle-switch (checked = visible)
-function toggleTypeVisible(id, checked) { setTypeHidden(id, !checked); }
-
-// Config-list eye button (flips current state)
+// Config-list eye button (flips current state) — the single visibility control
 function toggleTypeHidden(id) { setTypeHidden(id, !hiddenTypeIds.has(id)); }
 
 function loadHidden() {
@@ -1208,11 +1205,17 @@ function renderTypeLegend() {
   // would otherwise leave a highlight stuck on the map.
   clearLocationHighlight();
   if (!locationTypes.length) { el.innerHTML = '<span class="hint">No types yet</span>'; return; }
-  el.innerHTML = locationTypes.map(t => {
+  // Hidden types are controlled from the Configure tab's eye toggle and are
+  // omitted from the map view entirely — not just dimmed.
+  const visibleTypes = locationTypes.filter(t => !hiddenTypeIds.has(t._id));
+  if (!visibleTypes.length) {
+    el.innerHTML = '<span class="hint">All types hidden — unhide them in the Configure tab.</span>';
+    return;
+  }
+  el.innerHTML = visibleTypes.map(t => {
     const locs = locations.filter(l => l.typeId === t._id);
     const excludedCount = locs.filter(l => excludedLocIds.has(l._id)).length;
     const expanded = expandedTypeIds.has(t._id);
-    const visChecked = !hiddenTypeIds.has(t._id);
     const sublist = locs.length
       ? locs.map(l => {
           const isBorder = borderImpactingIds.has(l._id) && !excludedLocIds.has(l._id);
@@ -1236,10 +1239,6 @@ function renderTypeLegend() {
                 onclick="toggleTypeExpand('${t._id}')" title="Filter individual ${t.name} locations">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M3 5h18l-7 8v5l-4 2v-7z"/></svg>${excludedCount ? `<span class="excl-badge">${excludedCount}</span>` : ''}
         </button>
-        <label class="toggle-switch" title="Show/hide ${t.name} on map">
-          <input type="checkbox" ${visChecked ? 'checked' : ''} onchange="toggleTypeVisible('${t._id}', this.checked)">
-          <span class="slider"></span>
-        </label>
       </div>
       <div class="legend-sublist" style="display:${expanded ? 'flex' : 'none'}">${sublist}</div>
     </div>`;
