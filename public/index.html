@@ -606,10 +606,17 @@ let orsMaxMinutes = 60;        // drive times beyond this are approximated
 let projectPins = [];
 let makePermanentPinId = null;
 
-// Per-type display toggles and per-location exclusions, both persisted in
-// localStorage. Hidden types are dropped from the map view only; excluded
-// locations are dropped from coverage AND territory membership.
+// Per-type display state and per-location exclusions, all persisted in
+// localStorage:
+//  • hiddenTypeIds   — Configure-tab eye. The type is treated as if it doesn't
+//                      exist on the Map tab: absent from the legend, never drawn,
+//                      not even prefetched.
+//  • filteredTypeIds — Map-tab legend toggle. A quick show/hide for types that
+//                      DO exist; they stay listed in the legend so they can be
+//                      toggled back on.
+//  • excludedLocIds  — individual locations dropped from coverage AND membership.
 let hiddenTypeIds = new Set();
+let filteredTypeIds = new Set();
 let excludedLocIds = new Set();
 let expandedTypeIds = new Set();
 
@@ -692,6 +699,7 @@ async function boot() {
   loadProjectPins();
   loadExcluded();
   loadHidden();
+  loadFiltered();
   progressSet(0);
   await loadData();
   await prefetchCoverage();
@@ -1025,9 +1033,28 @@ async function prefetchCoverage() {
   await runWithProgress(coverageCandidates(), l => getLocationPolygon(l));
 }
 
-// Shared visibility filter — type IDs whose display toggle is on
+// Shared visibility filter — type IDs actually drawn on the map: neither
+// Configure-hidden nor toggled off via the legend's quick filter.
 function getVisibleTypeIds() {
-  return new Set(locationTypes.filter(t => !hiddenTypeIds.has(t._id)).map(t => t._id));
+  return new Set(locationTypes
+    .filter(t => !hiddenTypeIds.has(t._id) && !filteredTypeIds.has(t._id))
+    .map(t => t._id));
+}
+
+// Legend quick-filter toggle (checked = drawn). Persisted so the map view stays
+// as the user left it, but the type remains listed so it can be toggled back.
+function toggleTypeFiltered(id, checked) {
+  if (checked) filteredTypeIds.delete(id); else filteredTypeIds.add(id);
+  saveFiltered();
+  applyVisibility();   // redraw pins + coverage
+}
+
+function loadFiltered() {
+  try { filteredTypeIds = new Set(JSON.parse(localStorage.getItem('filteredTypeIds') || '[]')); }
+  catch (e) { filteredTypeIds = new Set(); }
+}
+function saveFiltered() {
+  localStorage.setItem('filteredTypeIds', JSON.stringify([...filteredTypeIds]));
 }
 
 // Set a whole type's visibility (display only — does not affect membership).
@@ -1216,6 +1243,7 @@ function renderTypeLegend() {
     const locs = locations.filter(l => l.typeId === t._id);
     const excludedCount = locs.filter(l => excludedLocIds.has(l._id)).length;
     const expanded = expandedTypeIds.has(t._id);
+    const drawn = !filteredTypeIds.has(t._id);
     const sublist = locs.length
       ? locs.map(l => {
           const isBorder = borderImpactingIds.has(l._id) && !excludedLocIds.has(l._id);
@@ -1239,6 +1267,10 @@ function renderTypeLegend() {
                 onclick="toggleTypeExpand('${t._id}')" title="Filter individual ${t.name} locations">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M3 5h18l-7 8v5l-4 2v-7z"/></svg>${excludedCount ? `<span class="excl-badge">${excludedCount}</span>` : ''}
         </button>
+        <label class="toggle-switch" title="Show/hide ${t.name} on the map">
+          <input type="checkbox" ${drawn ? 'checked' : ''} onchange="toggleTypeFiltered('${t._id}', this.checked)">
+          <span class="slider"></span>
+        </label>
       </div>
       <div class="legend-sublist" style="display:${expanded ? 'flex' : 'none'}">${sublist}</div>
     </div>`;
