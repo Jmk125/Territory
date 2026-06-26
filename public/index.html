@@ -2913,18 +2913,30 @@ function renderBoundaryLayers() {
     const colorLow = type.colorScaleLow || '#ffffcc';
     const colorHigh = type.colorScaleHigh || '#800026';
 
-    // Compute value range for choropleth
-    let minVal = Infinity, maxVal = -Infinity;
+    // Build a sorted array of all numeric values for quantile-based coloring.
+    // A quantile scale distributes colors evenly across the rank order, so
+    // skewed data (e.g. a few huge school districts among hundreds of small
+    // ones) still produces a meaningful gradient instead of nearly everything
+    // mapping to the low end.
+    let sortedVals = [];
     if (colorByField && geojson.features) {
       geojson.features.forEach(f => {
         const v = f.properties && f.properties[colorByField];
-        if (typeof v === 'number' && isFinite(v)) {
-          if (v < minVal) minVal = v;
-          if (v > maxVal) maxVal = v;
-        }
+        if (typeof v === 'number' && isFinite(v)) sortedVals.push(v);
       });
+      sortedVals.sort((a, b) => a - b);
     }
-    const hasRange = isFinite(minVal) && isFinite(maxVal) && maxVal > minVal;
+    const hasRange = sortedVals.length > 1 && sortedVals[0] !== sortedVals[sortedVals.length - 1];
+
+    // Map a value to 0–1 via its rank in the sorted distribution
+    function quantilePosition(v) {
+      let lo = 0, hi = sortedVals.length - 1;
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (sortedVals[mid] < v) lo = mid + 1; else hi = mid;
+      }
+      return sortedVals.length > 1 ? lo / (sortedVals.length - 1) : 0;
+    }
 
     const nameField = type.tooltipNameField || '';
     const baseFields = type.tooltipFields || [];
@@ -2935,8 +2947,7 @@ function renderBoundaryLayers() {
         if (colorByField && hasRange) {
           const v = feature.properties && feature.properties[colorByField];
           if (typeof v === 'number' && isFinite(v)) {
-            const t2 = (v - minVal) / (maxVal - minVal);
-            fillColor = interpolateColor(colorLow, colorHigh, t2);
+            fillColor = interpolateColor(colorLow, colorHigh, quantilePosition(v));
           }
         }
         return { color: type.color, weight: 1.5, opacity: 0.8, fillColor, fillOpacity: 0.5 };
