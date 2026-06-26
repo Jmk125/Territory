@@ -155,7 +155,7 @@
     .map-controls {
       position: absolute; top: 12px; right: 12px; z-index: 800;
       background: var(--surface); border: 1px solid var(--border);
-      border-radius: var(--radius); padding: 12px; width: 220px;
+      border-radius: var(--radius); padding: 12px; width: 330px;
       display: flex; flex-direction: column; gap: 10px;
       max-height: calc(100% - 24px); overflow-y: auto;
       transition: transform 0.28s cubic-bezier(0.4,0,0.2,1), opacity 0.22s;
@@ -627,6 +627,14 @@
           <div><label class="field-label">Low</label><input type="color" id="nt-clow" value="#ffffcc" onchange="updateNewTypeScalePreview()"></div>
           <div><label class="field-label">High</label><input type="color" id="nt-chigh" value="#800026" onchange="updateNewTypeScalePreview()"></div>
           <div style="flex:1;display:flex;align-items:flex-end"><div class="color-scale-preview" id="nt-scale-preview" style="width:100%;background:linear-gradient(to right,#ffffcc,#800026)"></div></div>
+        </div>
+        <div style="margin-top:8px">
+          <label class="field-label">Tooltip name field</label>
+          <select id="nt-namefield" style="width:100%"><option value="">(upload GeoJSON first)</option></select>
+        </div>
+        <div style="margin-top:8px">
+          <label class="field-label">Tooltip fields</label>
+          <div class="tab-checkboxes" id="nt-tooltip-fields"><span class="hint">Upload GeoJSON first</span></div>
         </div>
       </div>
       <div id="nt-tab-checkboxes" style="margin-top:8px"></div>
@@ -1334,6 +1342,8 @@ function renderTypeLegend() {
   el.innerHTML = visibleTypes.map(t => {
     if (t.layerKind === 'boundary') {
       const drawn = !filteredTypeIds.has(t._id);
+      const colorByOpts = boundaryFieldOptions(t);
+      const hasScale = t.colorByField && t.colorScaleLow && t.colorScaleHigh;
       return `<div class="legend-type">
         <div class="legend-item">
           <div class="legend-swatch" style="background:${t.color}"></div>
@@ -1343,6 +1353,13 @@ function renderTypeLegend() {
             <input type="checkbox" ${drawn ? 'checked' : ''} onchange="toggleTypeFiltered('${t._id}', this.checked)">
             <span class="slider"></span>
           </label>
+        </div>
+        <div style="margin:4px 0 2px 22px">
+          <label class="field-label" style="margin-bottom:2px">Color by</label>
+          <select style="width:100%;padding:4px 6px;font-size:0.75rem" onchange="changeBoundaryColorBy('${t._id}', this.value)">
+            ${colorByOpts}
+          </select>
+          ${hasScale ? `<div class="color-scale-preview" style="height:10px;border-radius:3px;margin-top:3px;background:linear-gradient(to right, ${t.colorScaleLow}, ${t.colorScaleHigh})"></div>` : ''}
         </div>
       </div>`;
     }
@@ -1562,8 +1579,10 @@ async function addLocationType() {
     const colorByField = document.getElementById('nt-colorby')?.value || '';
     const colorScaleLow = document.getElementById('nt-clow')?.value || '#ffffcc';
     const colorScaleHigh = document.getElementById('nt-chigh')?.value || '#800026';
+    const tooltipNameField = document.getElementById('nt-namefield')?.value || '';
+    const tooltipFields = Array.from(document.querySelectorAll('input[name="nt-ttfields"]:checked')).map(e => e.value);
     await fetch('/api/location-types', { method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ name, color, layerKind: 'boundary', tabIds, geojsonData, colorByField, colorScaleLow, colorScaleHigh }) });
+      body: JSON.stringify({ name, color, layerKind: 'boundary', tabIds, geojsonData, colorByField, colorScaleLow, colorScaleHigh, tooltipNameField, tooltipFields }) });
     delete window['_geojsonData_nt'];
   } else {
     const color = document.getElementById('new-type-color').value;
@@ -1700,6 +1719,21 @@ function renderLocationsList() {
             <div style="flex:1; display:flex; align-items:flex-end">
               <div class="color-scale-preview" id="boundary-scale-preview-edit" style="width:100%;background:linear-gradient(to right, ${type.colorScaleLow || '#ffffcc'}, ${type.colorScaleHigh || '#800026'})"></div>
             </div>
+          </div>
+          <div style="margin-top:20px; border-top:1px solid var(--border); padding-top:16px">
+            <div class="section-divider" style="margin-top:0">Hover Tooltip</div>
+            <div class="hint" style="margin-bottom:8px">Choose which GeoJSON properties appear when hovering over a boundary polygon.</div>
+            <label class="field-label">Name field (shown as title)</label>
+            <select id="boundary-namefield-edit" style="width:100%">
+              <option value="">(none)</option>
+              ${boundaryAllFieldNames(type).map(f => `<option value="${f}" ${f === type.tooltipNameField ? 'selected' : ''}>${f}</option>`).join('')}
+            </select>
+            <label class="field-label" style="margin-top:10px">Additional fields to always show</label>
+            <div class="tab-checkboxes" id="boundary-tooltip-fields">
+              ${boundaryAllFieldNames(type).map(f => `<label><input type="checkbox" name="btt-fields" value="${f}" ${(type.tooltipFields || []).includes(f) ? 'checked' : ''}> ${escapeHtml(f)}</label>`).join('')}
+            </div>
+            <div class="hint" style="margin-top:4px">The color-by field is also included automatically.</div>
+            <button class="btn btn-success btn-sm" style="margin-top:10px" onclick="saveBoundaryTooltipConfig('${type._id}')">Save Tooltip Settings</button>
           </div>
           <div style="margin-top:16px">
             ${tabCheckboxesHtml('boundary-edit', type.tabIds)}
@@ -2756,7 +2790,8 @@ function readTabCheckboxes(prefix) {
 // ══════════════════════════════════
 // BOUNDARY LAYER HELPERS
 // ══════════════════════════════════
-function boundaryFieldOptions(type) {
+function boundaryFieldOptions(type, selectedField) {
+  const sel = selectedField !== undefined ? selectedField : (type.colorByField || '');
   let opts = '<option value="">(none)</option>';
   if (!type.geojsonData) return opts;
   try {
@@ -2765,9 +2800,21 @@ function boundaryFieldOptions(type) {
     (data.features || []).forEach(f => {
       if (f.properties) Object.entries(f.properties).forEach(([k, v]) => { if (typeof v === 'number') fields.add(k); });
     });
-    fields.forEach(f => { opts += `<option value="${f}" ${f === type.colorByField ? 'selected' : ''}>${f}</option>`; });
+    fields.forEach(f => { opts += `<option value="${f}" ${f === sel ? 'selected' : ''}>${f}</option>`; });
   } catch (e) {}
   return opts;
+}
+
+function boundaryAllFieldNames(type) {
+  if (!type.geojsonData) return [];
+  try {
+    const data = typeof type.geojsonData === 'string' ? JSON.parse(type.geojsonData) : type.geojsonData;
+    const fields = new Set();
+    (data.features || []).forEach(f => {
+      if (f.properties) Object.keys(f.properties).forEach(k => fields.add(k));
+    });
+    return Array.from(fields);
+  } catch (e) { return []; }
 }
 
 async function handleBoundaryReupload(typeId, inputEl) {
@@ -2793,6 +2840,11 @@ async function handleBoundaryReupload(typeId, inputEl) {
   reader.readAsText(file);
 }
 
+async function changeBoundaryColorBy(typeId, value) {
+  await saveBoundaryColorBy(typeId, value);
+  renderTypeLegend();
+}
+
 async function saveBoundaryColorBy(typeId, value) {
   await fetch(`/api/location-types/${typeId}`, {
     method: 'PUT', headers: { 'Content-Type': 'application/json' },
@@ -2814,6 +2866,18 @@ async function saveBoundaryColors(typeId) {
   if (t) { t.colorScaleLow = low; t.colorScaleHigh = high; }
   const preview = document.getElementById('boundary-scale-preview-edit');
   if (preview) preview.style.background = `linear-gradient(to right, ${low}, ${high})`;
+  renderBoundaryLayers();
+}
+
+async function saveBoundaryTooltipConfig(typeId) {
+  const tooltipNameField = document.getElementById('boundary-namefield-edit')?.value || '';
+  const tooltipFields = Array.from(document.querySelectorAll('input[name="btt-fields"]:checked')).map(e => e.value);
+  await fetch(`/api/location-types/${typeId}`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ tooltipNameField, tooltipFields })
+  });
+  const t = locationTypes.find(x => x._id === typeId);
+  if (t) { t.tooltipNameField = tooltipNameField; t.tooltipFields = tooltipFields; }
   renderBoundaryLayers();
 }
 
@@ -2872,6 +2936,9 @@ function renderBoundaryLayers() {
     }
     const hasRange = isFinite(minVal) && isFinite(maxVal) && maxVal > minVal;
 
+    const nameField = type.tooltipNameField || '';
+    const baseFields = type.tooltipFields || [];
+
     L.geoJSON(geojson, {
       style: (feature) => {
         let fillColor = type.color;
@@ -2886,7 +2953,23 @@ function renderBoundaryLayers() {
       },
       onEachFeature: (feature, layer) => {
         if (!feature.properties) return;
-        const rows = Object.entries(feature.properties)
+        const props = feature.properties;
+
+        // Hover tooltip: name + base fields + color-by field
+        const tooltipFields = new Set(baseFields);
+        if (colorByField) tooltipFields.add(colorByField);
+        const name = nameField && props[nameField] != null ? String(props[nameField]) : '';
+        const detailRows = Array.from(tooltipFields)
+          .filter(k => k !== nameField && props[k] != null && props[k] !== '')
+          .map(k => `<div style="font-size:11px;color:#aab"><span style="color:#889">${escapeHtml(k)}:</span> <b>${escapeHtml(String(props[k]))}</b></div>`)
+          .join('');
+        if (name || detailRows) {
+          const tip = `<div style="line-height:1.4">${name ? `<div style="font-weight:700;font-size:13px;margin-bottom:2px">${escapeHtml(name)}</div>` : ''}${detailRows}</div>`;
+          layer.bindTooltip(tip, { sticky: true, direction: 'top', offset: [0, -10] });
+        }
+
+        // Click popup: all properties
+        const rows = Object.entries(props)
           .filter(([k, v]) => v != null && v !== '')
           .map(([k, v]) => `<tr><td>${escapeHtml(k)}</td><td>${escapeHtml(String(v))}</td></tr>`)
           .join('');
@@ -2915,6 +2998,19 @@ function handleGeoJsonUpload(inputEl, statusEl, prefix) {
       const sel = document.getElementById(prefix + '-colorby');
       if (sel) {
         sel.innerHTML = '<option value="">(none)</option>' + Array.from(fields).map(f => `<option value="${f}">${f}</option>`).join('');
+      }
+      // Populate tooltip selectors
+      const allFields = new Set();
+      data.features.forEach(f => { if (f.properties) Object.keys(f.properties).forEach(k => allFields.add(k)); });
+      const nameFieldSel = document.getElementById(prefix + '-namefield');
+      if (nameFieldSel) {
+        nameFieldSel.innerHTML = '<option value="">(none)</option>' + Array.from(allFields).map(f => `<option value="${f}">${f}</option>`).join('');
+      }
+      const tooltipHost = document.getElementById(prefix + '-tooltip-fields');
+      if (tooltipHost) {
+        tooltipHost.innerHTML = Array.from(allFields).map(f =>
+          `<label><input type="checkbox" name="${prefix}-ttfields" value="${f}"> ${f}</label>`
+        ).join('') || '<span class="hint">No fields found</span>';
       }
     } catch (err) {
       statusEl.textContent = 'Error: ' + err.message;
