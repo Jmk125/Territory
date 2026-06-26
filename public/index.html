@@ -583,10 +583,10 @@
       <div>
         <label class="field-label">Layer Kind</label>
         <div class="radio-group">
-          <input type="radio" name="new-type-kind" id="ntk-iso" value="isochrone" checked onchange="toggleNewTypeKind()">
-          <label for="ntk-iso">Isochrone</label>
-          <input type="radio" name="new-type-kind" id="ntk-boundary" value="boundary" onchange="toggleNewTypeKind()">
-          <label for="ntk-boundary">Boundary</label>
+          <input type="radio" name="new-type-kind" id="ntk-iso" value="isochrone" checked onchange="toggleNewTypeKind()" onclick="toggleNewTypeKind()">
+          <label for="ntk-iso" onclick="document.getElementById('ntk-iso').checked=true;toggleNewTypeKind()">Isochrone</label>
+          <input type="radio" name="new-type-kind" id="ntk-boundary" value="boundary" onchange="toggleNewTypeKind()" onclick="toggleNewTypeKind()">
+          <label for="ntk-boundary" onclick="document.getElementById('ntk-boundary').checked=true;toggleNewTypeKind()">Boundary</label>
         </div>
       </div>
       <div id="nt-isochrone-fields">
@@ -627,14 +627,6 @@
           <div><label class="field-label">Low</label><input type="color" id="nt-clow" value="#ffffcc" onchange="updateNewTypeScalePreview()"></div>
           <div><label class="field-label">High</label><input type="color" id="nt-chigh" value="#800026" onchange="updateNewTypeScalePreview()"></div>
           <div style="flex:1;display:flex;align-items:flex-end"><div class="color-scale-preview" id="nt-scale-preview" style="width:100%;background:linear-gradient(to right,#ffffcc,#800026)"></div></div>
-        </div>
-        <div style="margin-top:8px">
-          <label class="field-label">Tooltip name field</label>
-          <select id="nt-namefield" style="width:100%"><option value="">(upload GeoJSON first)</option></select>
-        </div>
-        <div style="margin-top:8px">
-          <label class="field-label">Tooltip fields</label>
-          <div class="tab-checkboxes" id="nt-tooltip-fields"><span class="hint">Upload GeoJSON first</span></div>
         </div>
       </div>
       <div id="nt-tab-checkboxes" style="margin-top:8px"></div>
@@ -1579,10 +1571,8 @@ async function addLocationType() {
     const colorByField = document.getElementById('nt-colorby')?.value || '';
     const colorScaleLow = document.getElementById('nt-clow')?.value || '#ffffcc';
     const colorScaleHigh = document.getElementById('nt-chigh')?.value || '#800026';
-    const tooltipNameField = document.getElementById('nt-namefield')?.value || '';
-    const tooltipFields = Array.from(document.querySelectorAll('input[name="nt-ttfields"]:checked')).map(e => e.value);
     await fetch('/api/location-types', { method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ name, color, layerKind: 'boundary', tabIds, geojsonData, colorByField, colorScaleLow, colorScaleHigh, tooltipNameField, tooltipFields }) });
+      body: JSON.stringify({ name, color, layerKind: 'boundary', tabIds, geojsonData, colorByField, colorScaleLow, colorScaleHigh }) });
     delete window['_geojsonData_nt'];
   } else {
     const color = document.getElementById('new-type-color').value;
@@ -2998,19 +2988,6 @@ function handleGeoJsonUpload(inputEl, statusEl, prefix) {
       const sel = document.getElementById(prefix + '-colorby');
       if (sel) {
         sel.innerHTML = '<option value="">(none)</option>' + Array.from(fields).map(f => `<option value="${f}">${f}</option>`).join('');
-      }
-      // Populate tooltip selectors
-      const allFields = new Set();
-      data.features.forEach(f => { if (f.properties) Object.keys(f.properties).forEach(k => allFields.add(k)); });
-      const nameFieldSel = document.getElementById(prefix + '-namefield');
-      if (nameFieldSel) {
-        nameFieldSel.innerHTML = '<option value="">(none)</option>' + Array.from(allFields).map(f => `<option value="${f}">${f}</option>`).join('');
-      }
-      const tooltipHost = document.getElementById(prefix + '-tooltip-fields');
-      if (tooltipHost) {
-        tooltipHost.innerHTML = Array.from(allFields).map(f =>
-          `<label><input type="checkbox" name="${prefix}-ttfields" value="${f}"> ${f}</label>`
-        ).join('') || '<span class="hint">No fields found</span>';
       }
     } catch (err) {
       statusEl.textContent = 'Error: ' + err.message;
