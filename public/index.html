@@ -238,7 +238,7 @@
       flex-direction: row; overflow: hidden;
     }
     .config-sidebar {
-      width: 260px; flex-shrink: 0; background: var(--surface);
+      width: 300px; flex-shrink: 0; background: var(--surface);
       border-right: 1px solid var(--border); display: flex; flex-direction: column;
       overflow: hidden;
     }
@@ -274,6 +274,11 @@
     .type-item .edit-btn { opacity: 0; background: none; border: none; color: var(--text2); cursor: pointer; font-size: 0.9rem; line-height: 1; transition: opacity 0.1s; padding: 0 2px; }
     .type-item:hover .edit-btn { opacity: 1; }
     .type-item .edit-btn:hover { color: var(--accent); }
+    /* Eye toggle stays visible (not hover-only) so hidden state reads at a glance */
+    .type-item .vis-btn { background: none; border: none; color: var(--text2); cursor: pointer; padding: 0 2px; line-height: 0; display: flex; align-items: center; transition: color 0.1s; }
+    .type-item .vis-btn:hover { color: var(--accent); }
+    .type-item.type-hidden .vis-btn { color: var(--accent2); }
+    .type-item.type-hidden .type-name, .type-item.type-hidden .type-dot { opacity: 0.4; }
 
     /* Add type form */
     .add-type-form {
@@ -601,8 +606,9 @@ let orsMaxMinutes = 60;        // drive times beyond this are approximated
 let projectPins = [];
 let makePermanentPinId = null;
 
-// Per-type display toggles (in-memory) and per-location exclusions (persisted).
-// Excluded locations are dropped from coverage AND territory membership.
+// Per-type display toggles and per-location exclusions, both persisted in
+// localStorage. Hidden types are dropped from the map view only; excluded
+// locations are dropped from coverage AND territory membership.
 let hiddenTypeIds = new Set();
 let excludedLocIds = new Set();
 let expandedTypeIds = new Set();
@@ -685,6 +691,7 @@ async function boot() {
   restoreCoveragePaneState();
   loadProjectPins();
   loadExcluded();
+  loadHidden();
   progressSet(0);
   await loadData();
   await prefetchCoverage();
@@ -1023,10 +1030,28 @@ function getVisibleTypeIds() {
   return new Set(locationTypes.filter(t => !hiddenTypeIds.has(t._id)).map(t => t._id));
 }
 
-// Toggle a whole type's visibility (display only — does not affect membership)
-function toggleTypeVisible(id, checked) {
-  if (checked) hiddenTypeIds.delete(id); else hiddenTypeIds.add(id);
-  applyVisibility();
+// Set a whole type's visibility (display only — does not affect membership).
+// Persisted, and reflected in both the coverage legend and the config list.
+function setTypeHidden(id, hidden) {
+  if (hidden) hiddenTypeIds.add(id); else hiddenTypeIds.delete(id);
+  saveHidden();
+  applyVisibility();   // redraw pins + coverage
+  renderTypeList();    // keep the config eye icon in sync
+  renderTypeLegend();  // keep the legend toggle in sync
+}
+
+// Legend toggle-switch (checked = visible)
+function toggleTypeVisible(id, checked) { setTypeHidden(id, !checked); }
+
+// Config-list eye button (flips current state)
+function toggleTypeHidden(id) { setTypeHidden(id, !hiddenTypeIds.has(id)); }
+
+function loadHidden() {
+  try { hiddenTypeIds = new Set(JSON.parse(localStorage.getItem('hiddenTypeIds') || '[]')); }
+  catch (e) { hiddenTypeIds = new Set(); }
+}
+function saveHidden() {
+  localStorage.setItem('hiddenTypeIds', JSON.stringify([...hiddenTypeIds]));
 }
 
 // Expand/collapse the per-location filter list under a type
@@ -1157,14 +1182,24 @@ function renderTypeList() {
   }
   list.innerHTML = locationTypes.map(t => {
     const count = locations.filter(l => l.typeId === t._id).length;
-    return `<div class="type-item ${selectedTypeId === t._id ? 'active' : ''}" onclick="selectType('${t._id}')">
+    const hidden = hiddenTypeIds.has(t._id);
+    return `<div class="type-item ${selectedTypeId === t._id ? 'active' : ''} ${hidden ? 'type-hidden' : ''}" onclick="selectType('${t._id}')">
       <div class="type-dot" style="background:${t.color}"></div>
       <span class="type-name">${t.name}</span>
       <span class="type-count">${count} loc${count !== 1 ? 's' : ''}</span>
+      <button class="vis-btn" onclick="event.stopPropagation(); toggleTypeHidden('${t._id}')" title="${hidden ? 'Show on map' : 'Hide from map'}">${eyeIcon(hidden)}</button>
       <button class="edit-btn" onclick="event.stopPropagation(); editLocationType('${t._id}')" title="Edit type">✏</button>
       <button class="del-btn" onclick="event.stopPropagation(); deleteType('${t._id}')" title="Delete type">✕</button>
     </div>`;
   }).join('');
+}
+
+// Feather-style eye / eye-off icon for the visibility toggle.
+function eyeIcon(hidden) {
+  const attrs = 'width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"';
+  return hidden
+    ? `<svg ${attrs}><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>`
+    : `<svg ${attrs}><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>`;
 }
 
 function renderTypeLegend() {
