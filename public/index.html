@@ -235,7 +235,10 @@
 
     /* ── CONFIGURE PANEL ── */
     #panel-config {
-      flex-direction: row; overflow: hidden;
+      flex-direction: column; overflow: hidden;
+    }
+    #panel-config > div:last-of-type {
+      flex-direction: row; flex: 1; overflow: hidden;
     }
     .config-sidebar {
       width: 300px; flex-shrink: 0; background: var(--surface);
@@ -413,6 +416,37 @@
     .ors-opt input { margin-top: 3px; }
     .ors-opt-title { font-weight: 700; font-size: 0.88rem; margin-bottom: 2px; }
     .ors-opt code, .modal-body code { background: var(--surface2); padding: 1px 4px; border-radius: 4px; font-size: 0.85em; }
+
+    /* ── MAP TAB BAR ── */
+    .map-tab-bar { display: flex; align-items: center; gap: 2px; padding: 0 12px; background: var(--surface); border-bottom: 1px solid var(--border); flex-shrink: 0; min-height: 36px; }
+    .map-tab-btn { padding: 7px 14px; background: none; border: none; color: var(--text2); font-size: 0.8rem; font-weight: 600; cursor: pointer; border-bottom: 2px solid transparent; transition: all 0.15s; }
+    .map-tab-btn:hover { color: var(--text); }
+    .map-tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+    /* ── CONFIG TAB MANAGEMENT ── */
+    .config-tabs-bar { display: flex; align-items: center; gap: 6px; padding: 10px 16px; border-bottom: 1px solid var(--border); background: var(--bg); flex-wrap: wrap; }
+    .config-tabs-bar .tab-pill { padding: 5px 12px; border-radius: 16px; font-size: 0.78rem; font-weight: 600; cursor: pointer; border: 1px solid var(--border); background: var(--surface2); color: var(--text2); transition: all 0.15s; display: inline-flex; align-items: center; gap: 5px; }
+    .config-tabs-bar .tab-pill.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+    .config-tabs-bar .tab-pill .pill-del { font-size: 0.7rem; opacity: 0.6; margin-left: 2px; }
+    .config-tabs-bar .tab-pill .pill-del:hover { opacity: 1; color: var(--danger); }
+    .config-tabs-bar .tab-add-btn { padding: 5px 10px; border-radius: 16px; font-size: 0.78rem; cursor: pointer; border: 1px dashed var(--border); background: none; color: var(--text2); }
+    .config-tabs-bar .tab-add-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+    /* ── BOUNDARY LAYER ── */
+    .geojson-upload { margin-top: 8px; }
+    .geojson-upload input[type=file] { display: none; }
+    .geojson-upload .upload-btn { display: inline-flex; align-items: center; gap: 6px; padding: 8px 14px; border: 1px dashed var(--border); border-radius: var(--radius); background: var(--surface2); color: var(--text2); cursor: pointer; font-size: 0.8rem; transition: all 0.15s; }
+    .geojson-upload .upload-btn:hover { border-color: var(--accent); color: var(--accent); }
+    .geojson-upload .upload-status { font-size: 0.75rem; color: var(--success); margin-top: 4px; }
+    .color-scale-preview { height: 16px; border-radius: 4px; margin-top: 4px; }
+    .tab-checkboxes { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+    .tab-checkboxes label { font-size: 0.78rem; display: flex; align-items: center; gap: 4px; cursor: pointer; }
+    .tab-checkboxes input { accent-color: var(--accent); }
+
+    /* ── BOUNDARY POPUP ── */
+    .boundary-popup table { border-collapse: collapse; font-size: 0.78rem; width: 100%; }
+    .boundary-popup td { padding: 3px 8px; border-bottom: 1px solid #eee; }
+    .boundary-popup td:first-child { font-weight: 600; color: #555; white-space: nowrap; }
   </style>
 </head>
 <body>
@@ -476,6 +510,7 @@
 
 <!-- MAP PANEL -->
 <div id="panel-map" class="panel active">
+  <div class="map-tab-bar" id="map-tab-bar"></div>
   <div id="map"></div>
 
   <button class="mc-reopen-btn" id="mc-reopen-btn" onclick="toggleCoveragePane()" title="Show coverage panel" style="display:none">☰ Coverage</button>
@@ -532,6 +567,8 @@
 
 <!-- CONFIG PANEL -->
 <div id="panel-config" class="panel">
+  <div class="config-tabs-bar" id="config-tabs-bar"></div>
+  <div style="display:flex; flex:1; overflow:hidden;">
   <!-- Sidebar: Location Types -->
   <div class="config-sidebar">
     <div class="config-sidebar-header">
@@ -542,23 +579,56 @@
     <div class="add-type-form">
       <div class="section-divider" style="margin-top:0">New Type</div>
       <input type="text" id="new-type-name" placeholder="e.g. Superintendent" />
-      <div class="row" style="gap:8px; align-items:center">
-        <div style="flex:1">
-          <label class="field-label">Default Coverage</label>
-          <div class="row" style="gap:4px">
-            <input type="number" id="new-type-radius" placeholder="60" min="1" max="300" style="flex:1" />
-            <select id="new-type-unit" style="flex:1; padding:8px 6px;">
-              <option value="minutes">min</option>
-              <option value="miles">mi</option>
-            </select>
-          </div>
-        </div>
-        <div>
-          <label class="field-label">Color</label>
-          <input type="color" id="new-type-color" value="#4f8ef7" oninput="updateStylePreview('nt')" />
+      <div>
+        <label class="field-label">Layer Kind</label>
+        <div class="radio-group">
+          <input type="radio" name="new-type-kind" id="ntk-iso" value="isochrone" checked onchange="toggleNewTypeKind()">
+          <label for="ntk-iso">Isochrone</label>
+          <input type="radio" name="new-type-kind" id="ntk-boundary" value="boundary" onchange="toggleNewTypeKind()">
+          <label for="ntk-boundary">Boundary</label>
         </div>
       </div>
-      <div id="nt-style-host"></div>
+      <div id="nt-isochrone-fields">
+        <div class="row" style="gap:8px; align-items:center">
+          <div style="flex:1">
+            <label class="field-label">Default Coverage</label>
+            <div class="row" style="gap:4px">
+              <input type="number" id="new-type-radius" placeholder="60" min="1" max="300" style="flex:1" />
+              <select id="new-type-unit" style="flex:1; padding:8px 6px;">
+                <option value="minutes">min</option>
+                <option value="miles">mi</option>
+              </select>
+            </div>
+          </div>
+          <div>
+            <label class="field-label">Color</label>
+            <input type="color" id="new-type-color" value="#4f8ef7" oninput="updateStylePreview('nt')" />
+          </div>
+        </div>
+        <div id="nt-style-host"></div>
+      </div>
+      <div id="nt-boundary-fields" style="display:none">
+        <div>
+          <label class="field-label">Color</label>
+          <input type="color" id="new-type-color-b" value="#4f8ef7" />
+        </div>
+        <div class="geojson-upload">
+          <label class="upload-btn">📁 Upload GeoJSON file
+            <input type="file" id="nt-geojson-file" accept=".geojson,.json" onchange="handleGeoJsonUpload(this, document.getElementById('nt-geojson-status'), 'nt')">
+          </label>
+          <div class="upload-status" id="nt-geojson-status"></div>
+        </div>
+        <div style="margin-top:8px">
+          <label class="field-label">Color by property</label>
+          <select id="nt-colorby" style="width:100%"><option value="">(upload GeoJSON first)</option></select>
+        </div>
+        <div class="row" style="margin-top:8px; gap:8px">
+          <div><label class="field-label">Low</label><input type="color" id="nt-clow" value="#ffffcc" onchange="updateNewTypeScalePreview()"></div>
+          <div><label class="field-label">High</label><input type="color" id="nt-chigh" value="#800026" onchange="updateNewTypeScalePreview()"></div>
+          <div style="flex:1;display:flex;align-items:flex-end"><div class="color-scale-preview" id="nt-scale-preview" style="width:100%;background:linear-gradient(to right,#ffffcc,#800026)"></div></div>
+        </div>
+      </div>
+      <div id="nt-tab-checkboxes" style="margin-top:8px"></div>
       <button class="btn btn-success btn-sm" onclick="addLocationType()">+ Add Type</button>
     </div>
   </div>
@@ -571,6 +641,7 @@
         <p>Select a location type<br>to manage its locations</p>
       </div>
     </div>
+  </div>
   </div>
 </div>
 
@@ -598,9 +669,14 @@ let selectedTypeId = null;
 let geocodeTimer = null;
 let hasOrsKey = false;
 let editingLocId = null;
-let orsSettings = null;        // last-loaded ORS source settings (from server)
-let orsActive = false;         // true when isochrones are available (key or self-host)
-let orsMaxMinutes = 60;        // drive times beyond this are approximated
+let orsSettings = null;
+let orsActive = false;
+let orsMaxMinutes = 60;
+
+let mapTabs = [];
+let activeMapTabId = 'default';
+let activeConfigTabId = 'default';
+let boundaryLayers = {};       // typeId → L.layerGroup for boundary layers
 
 // Temporary project pins (client-side only, persisted in localStorage)
 let projectPins = [];
@@ -703,7 +779,7 @@ async function boot() {
   progressSet(0);
   await loadData();
   await prefetchCoverage();
-  if (!splashVisible) { renderCoverage(); renderProjectBubbles(); }
+  if (!splashVisible) { renderCoverage(); renderBoundaryLayers(); renderProjectBubbles(); }
 }
 
 function dismissSplash() {
@@ -712,8 +788,9 @@ function dismissSplash() {
   splash.style.transition = 'opacity 0.5s';
   splash.style.opacity = '0';
   setTimeout(() => splash.style.display = 'none', 500);
-  boot();          // safety: start if it somehow hasn't
-  renderCoverage(); // draw now (polygons are already prefetched → fast)
+  boot();
+  renderCoverage();
+  renderBoundaryLayers();
   renderProjectBubbles();
 }
 
@@ -1001,10 +1078,17 @@ async function saveOrsSettings() {
 // ══════════════════════════════════
 // Fetch data + light renders (no coverage draw)
 async function loadData() {
-  [locationTypes, locations] = await Promise.all([
+  [locationTypes, locations, mapTabs] = await Promise.all([
     fetch('/api/location-types').then(r => r.json()),
-    fetch('/api/locations').then(r => r.json())
+    fetch('/api/locations').then(r => r.json()),
+    fetch('/api/map-tabs').then(r => r.json())
   ]);
+  // Ensure existing types without tabIds get assigned to default
+  locationTypes.forEach(t => { if (!t.tabIds) t.tabIds = ['default']; if (!t.layerKind) t.layerKind = 'isochrone'; });
+  renderMapTabBar();
+  renderConfigTabsBar();
+  const ntTabHost = document.getElementById('nt-tab-checkboxes');
+  if (ntTabHost) ntTabHost.innerHTML = tabCheckboxesHtml('nt', ['default']);
   renderTypeList();
   renderTypeLegend();
   renderPins();
@@ -1017,6 +1101,7 @@ async function loadData() {
 async function loadAll() {
   await loadData();
   await renderCoverage();
+  renderBoundaryLayers();
 }
 
 // Locations that should contribute coverage right now (visible, not excluded)
@@ -1024,7 +1109,7 @@ function coverageCandidates() {
   const visibleTypeIds = getVisibleTypeIds();
   return locations.filter(l => {
     const type = locationTypes.find(t => t._id === l.typeId);
-    return type && visibleTypeIds.has(l.typeId) && !excludedLocIds.has(l._id);
+    return type && type.layerKind !== 'boundary' && visibleTypeIds.has(l.typeId) && !excludedLocIds.has(l._id);
   });
 }
 
@@ -1037,7 +1122,8 @@ async function prefetchCoverage() {
 // Configure-hidden nor toggled off via the legend's quick filter.
 function getVisibleTypeIds() {
   return new Set(locationTypes
-    .filter(t => !hiddenTypeIds.has(t._id) && !filteredTypeIds.has(t._id))
+    .filter(t => !hiddenTypeIds.has(t._id) && !filteredTypeIds.has(t._id)
+      && (t.tabIds || ['default']).includes(activeMapTabId))
     .map(t => t._id));
 }
 
@@ -1181,6 +1267,7 @@ function saveExcluded() {
 function applyVisibility() {
   renderPins();
   renderCoverage();
+  renderBoundaryLayers();
 }
 
 // ══════════════════════════════════
@@ -1200,17 +1287,20 @@ function switchTab(tab) {
 // ══════════════════════════════════
 function renderTypeList() {
   const list = document.getElementById('type-list');
-  if (!locationTypes.length) {
-    list.innerHTML = '<div class="empty-state" style="padding:24px 12px"><div class="icon">🏷</div><p>No types yet.<br>Add one below.</p></div>';
+  const filteredTypes = locationTypes.filter(t => (t.tabIds || ['default']).includes(activeConfigTabId));
+  if (!filteredTypes.length) {
+    list.innerHTML = '<div class="empty-state" style="padding:24px 12px"><div class="icon">🏷</div><p>No types on this tab yet.<br>Add one below.</p></div>';
     return;
   }
-  list.innerHTML = locationTypes.map(t => {
-    const count = locations.filter(l => l.typeId === t._id).length;
+  list.innerHTML = filteredTypes.map(t => {
+    const count = t.layerKind === 'boundary' ? 0 : locations.filter(l => l.typeId === t._id).length;
     const hidden = hiddenTypeIds.has(t._id);
+    const kindBadge = t.layerKind === 'boundary' ? '<span class="hint" style="font-size:0.65rem;color:var(--accent2)">BOUNDARY</span>' : '';
+    const countLabel = t.layerKind === 'boundary' ? '' : `<span class="type-count">${count} loc${count !== 1 ? 's' : ''}</span>`;
     return `<div class="type-item ${selectedTypeId === t._id ? 'active' : ''} ${hidden ? 'type-hidden' : ''}" onclick="selectType('${t._id}')">
       <div class="type-dot" style="background:${t.color}"></div>
       <span class="type-name">${t.name}</span>
-      <span class="type-count">${count} loc${count !== 1 ? 's' : ''}</span>
+      ${kindBadge}${countLabel}
       <button class="vis-btn" onclick="event.stopPropagation(); toggleTypeHidden('${t._id}')" title="${hidden ? 'Show on map' : 'Hide from map'}">${eyeIcon(hidden)}</button>
       <button class="edit-btn" onclick="event.stopPropagation(); editLocationType('${t._id}')" title="Edit type">✏</button>
       <button class="del-btn" onclick="event.stopPropagation(); deleteType('${t._id}')" title="Delete type">✕</button>
@@ -1240,6 +1330,20 @@ function renderTypeLegend() {
     return;
   }
   el.innerHTML = visibleTypes.map(t => {
+    if (t.layerKind === 'boundary') {
+      const drawn = !filteredTypeIds.has(t._id);
+      return `<div class="legend-type">
+        <div class="legend-item">
+          <div class="legend-swatch" style="background:${t.color}"></div>
+          <span class="legend-name">${escapeHtml(t.name)}</span>
+          <span class="hint" style="font-size:0.6rem">BDY</span>
+          <label class="toggle-switch" title="Show/hide ${escapeHtml(t.name)} on the map">
+            <input type="checkbox" ${drawn ? 'checked' : ''} onchange="toggleTypeFiltered('${t._id}', this.checked)">
+            <span class="slider"></span>
+          </label>
+        </div>
+      </div>`;
+    }
     const locs = locations.filter(l => l.typeId === t._id);
     const excludedCount = locs.filter(l => excludedLocIds.has(l._id)).length;
     const expanded = expandedTypeIds.has(t._id);
@@ -1430,14 +1534,43 @@ function closeLocationInfo() {
   if (panel) panel.style.display = 'none';
 }
 
+function toggleNewTypeKind() {
+  const kind = document.querySelector('input[name="new-type-kind"]:checked')?.value || 'isochrone';
+  document.getElementById('nt-isochrone-fields').style.display = kind === 'isochrone' ? 'block' : 'none';
+  document.getElementById('nt-boundary-fields').style.display = kind === 'boundary' ? 'block' : 'none';
+}
+
+function updateNewTypeScalePreview() {
+  const low = document.getElementById('nt-clow')?.value || '#ffffcc';
+  const high = document.getElementById('nt-chigh')?.value || '#800026';
+  const p = document.getElementById('nt-scale-preview');
+  if (p) p.style.background = `linear-gradient(to right, ${low}, ${high})`;
+}
+
 async function addLocationType() {
   const name = document.getElementById('new-type-name').value.trim();
-  const color = document.getElementById('new-type-color').value;
-  const radius = parseInt(document.getElementById('new-type-radius').value) || 60;
-  const unit = document.getElementById('new-type-unit').value;
   if (!name) { alert('Please enter a type name.'); return; }
-  const style = readStyleInputs('nt');
-  await fetch('/api/location-types', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ name, color, defaultRadius: radius, defaultRadiusUnit: unit, ...stylePayload(style) }) });
+  const kind = document.querySelector('input[name="new-type-kind"]:checked')?.value || 'isochrone';
+  const tabIds = readTabCheckboxes('nt');
+
+  if (kind === 'boundary') {
+    const color = document.getElementById('new-type-color-b').value;
+    const geojsonData = window['_geojsonData_nt'] || null;
+    if (!geojsonData) { alert('Please upload a GeoJSON file.'); return; }
+    const colorByField = document.getElementById('nt-colorby')?.value || '';
+    const colorScaleLow = document.getElementById('nt-clow')?.value || '#ffffcc';
+    const colorScaleHigh = document.getElementById('nt-chigh')?.value || '#800026';
+    await fetch('/api/location-types', { method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ name, color, layerKind: 'boundary', tabIds, geojsonData, colorByField, colorScaleLow, colorScaleHigh }) });
+    delete window['_geojsonData_nt'];
+  } else {
+    const color = document.getElementById('new-type-color').value;
+    const radius = parseInt(document.getElementById('new-type-radius').value) || 60;
+    const unit = document.getElementById('new-type-unit').value;
+    const style = readStyleInputs('nt');
+    await fetch('/api/location-types', { method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ name, color, layerKind: 'isochrone', tabIds, defaultRadius: radius, defaultRadiusUnit: unit, ...stylePayload(style) }) });
+  }
   document.getElementById('new-type-name').value = '';
   document.getElementById('new-type-radius').value = '';
   await loadAll();
@@ -1455,11 +1588,8 @@ async function deleteType(id) {
 function editLocationType(id) {
   const t = locationTypes.find(x => x._id === id);
   if (!t) return;
-  openModal('✏ Edit Location Type', `
-    <div>
-      <label class="field-label">Name *</label>
-      <input type="text" id="et-name" value="${escapeHtml(t.name)}" />
-    </div>
+  const isBoundary = t.layerKind === 'boundary';
+  const coverageFields = isBoundary ? '' : `
     <div class="row" style="margin-top:12px; gap:8px; align-items:flex-end">
       <div style="flex:1">
         <label class="field-label">Default Coverage</label>
@@ -1477,12 +1607,24 @@ function editLocationType(id) {
       </div>
     </div>
     <div class="section-divider" style="margin-top:16px">Bubble Style</div>
-    <div class="style-controls boxed">${styleControlsHtml('et', 'et-color', t)}</div>
+    <div class="style-controls boxed">${styleControlsHtml('et', 'et-color', t)}</div>`;
+  const colorField = isBoundary ? `
+    <div style="margin-top:12px">
+      <label class="field-label">Color</label>
+      <input type="color" id="et-color" value="${t.color}" />
+    </div>` : '';
+  openModal('✏ Edit Location Type', `
+    <div>
+      <label class="field-label">Name *</label>
+      <input type="text" id="et-name" value="${escapeHtml(t.name)}" />
+    </div>
+    ${colorField}${coverageFields}
+    <div style="margin-top:16px">${tabCheckboxesHtml('et', t.tabIds)}</div>
     <div class="row" style="margin-top:18px; gap:8px">
       <button class="btn btn-success" onclick="saveLocationType('${id}')">💾 Save Changes</button>
       <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
     </div>`);
-  updateStylePreview('et');
+  if (!isBoundary) updateStylePreview('et');
 }
 
 async function saveLocationType(id) {
@@ -1490,13 +1632,17 @@ async function saveLocationType(id) {
   if (!t) return;
   const name = document.getElementById('et-name').value.trim();
   const color = document.getElementById('et-color').value;
-  const defaultRadius = parseInt(document.getElementById('et-radius').value) || t.defaultRadius;
-  const defaultRadiusUnit = document.getElementById('et-unit').value;
   if (!name) { alert('Name is required.'); return; }
-  const style = readStyleInputs('et');
+  const tabIds = readTabCheckboxes('et');
+  const body = { name, color, tabIds };
+  if (t.layerKind !== 'boundary') {
+    body.defaultRadius = parseInt(document.getElementById('et-radius').value) || t.defaultRadius;
+    body.defaultRadiusUnit = document.getElementById('et-unit').value;
+    Object.assign(body, stylePayload(readStyleInputs('et')));
+  }
   await fetch(`/api/location-types/${id}`, {
     method: 'PUT', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name, color, defaultRadius, defaultRadiusUnit, ...stylePayload(style) })
+    body: JSON.stringify(body)
   });
   closeModal();
   await loadAll();
@@ -1514,13 +1660,59 @@ function selectType(id) {
 function renderLocationsList() {
   const type = locationTypes.find(t => t._id === selectedTypeId);
   if (!type) return;
-  const locs = locations.filter(l => l.typeId === selectedTypeId);
   const main = document.getElementById('config-main');
 
+  if (type.layerKind === 'boundary') {
+    const featureCount = type.geojsonData ? (typeof type.geojsonData === 'string' ? JSON.parse(type.geojsonData) : type.geojsonData).features?.length || 0 : 0;
+    main.innerHTML = `
+      <div class="config-main-header">
+        <div>
+          <h2><span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${type.color};margin-right:8px;"></span>${escapeHtml(type.name)}</h2>
+          <div class="sub">Boundary layer · ${featureCount} feature${featureCount !== 1 ? 's' : ''}</div>
+        </div>
+      </div>
+      <div class="config-scroll">
+        <div style="max-width:500px">
+          <label class="field-label">GeoJSON Data</label>
+          <div class="geojson-upload">
+            <label class="upload-btn">📁 Upload GeoJSON file
+              <input type="file" accept=".geojson,.json" onchange="handleBoundaryReupload('${type._id}', this)">
+            </label>
+            <div class="upload-status" id="boundary-reupload-status">${featureCount ? `${featureCount} features loaded` : 'No data uploaded'}</div>
+          </div>
+          <div style="margin-top:16px">
+            <label class="field-label">Color by property (choropleth)</label>
+            <select id="boundary-colorby-edit" onchange="saveBoundaryColorBy('${type._id}', this.value)" style="width:100%">
+              ${boundaryFieldOptions(type)}
+            </select>
+          </div>
+          <div class="row" style="margin-top:12px; gap:8px">
+            <div>
+              <label class="field-label">Low color</label>
+              <input type="color" id="boundary-clow-edit" value="${type.colorScaleLow || '#ffffcc'}" onchange="saveBoundaryColors('${type._id}')">
+            </div>
+            <div>
+              <label class="field-label">High color</label>
+              <input type="color" id="boundary-chigh-edit" value="${type.colorScaleHigh || '#800026'}" onchange="saveBoundaryColors('${type._id}')">
+            </div>
+            <div style="flex:1; display:flex; align-items:flex-end">
+              <div class="color-scale-preview" id="boundary-scale-preview-edit" style="width:100%;background:linear-gradient(to right, ${type.colorScaleLow || '#ffffcc'}, ${type.colorScaleHigh || '#800026'})"></div>
+            </div>
+          </div>
+          <div style="margin-top:16px">
+            ${tabCheckboxesHtml('boundary-edit', type.tabIds)}
+            <button class="btn btn-success btn-sm" style="margin-top:8px" onclick="saveBoundaryTabs('${type._id}')">Save Tab Assignment</button>
+          </div>
+        </div>
+      </div>`;
+    return;
+  }
+
+  const locs = locations.filter(l => l.typeId === selectedTypeId);
   main.innerHTML = `
     <div class="config-main-header">
       <div>
-        <h2><span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${type.color};margin-right:8px;"></span>${type.name}</h2>
+        <h2><span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${type.color};margin-right:8px;"></span>${escapeHtml(type.name)}</h2>
         <div class="sub">Default: ${type.defaultRadius} ${type.defaultRadiusUnit} &nbsp;|&nbsp; ${locs.length} location${locs.length !== 1 ? 's' : ''}</div>
       </div>
       <button class="btn btn-primary btn-sm" onclick="showAddLocationForm()">+ Add Location</button>
@@ -2464,6 +2656,270 @@ function drawCoverageShape(iso, color, fillOpacity, weight) {
 function milesToMinutes(miles) {
   // ~50mph average driving
   return Math.round((miles / 50) * 60);
+}
+
+// ══════════════════════════════════
+// MAP TABS
+// ══════════════════════════════════
+function renderMapTabBar() {
+  const bar = document.getElementById('map-tab-bar');
+  if (!bar) return;
+  bar.innerHTML = mapTabs.map(t =>
+    `<button class="map-tab-btn ${t._id === activeMapTabId ? 'active' : ''}" onclick="switchMapTab('${t._id}')">${escapeHtml(t.name)}</button>`
+  ).join('');
+}
+
+function switchMapTab(tabId) {
+  activeMapTabId = tabId;
+  renderMapTabBar();
+  renderTypeLegend();
+  renderPins();
+  renderCoverage();
+  renderBoundaryLayers();
+}
+
+function renderConfigTabsBar() {
+  const bar = document.getElementById('config-tabs-bar');
+  if (!bar) return;
+  bar.innerHTML = mapTabs.map(t => {
+    const del = t.isDefault ? '' : `<span class="pill-del" onclick="event.stopPropagation(); deleteMapTab('${t._id}')" title="Delete tab">✕</span>`;
+    const rename = t.isDefault ? '' : ` ondblclick="event.stopPropagation(); renameMapTab('${t._id}')"`;
+    return `<span class="tab-pill ${t._id === activeConfigTabId ? 'active' : ''}" onclick="switchConfigTab('${t._id}')"${rename} title="${t.isDefault ? '' : 'Double-click to rename'}">${escapeHtml(t.name)}${del}</span>`;
+  }).join('') + `<button class="tab-add-btn" onclick="addMapTab()">+ Add Tab</button>`;
+}
+
+function switchConfigTab(tabId) {
+  activeConfigTabId = tabId;
+  renderConfigTabsBar();
+  renderTypeList();
+  if (selectedTypeId) {
+    const t = locationTypes.find(x => x._id === selectedTypeId);
+    if (!t || !(t.tabIds || []).includes(activeConfigTabId)) {
+      selectedTypeId = null;
+      const main = document.getElementById('config-main');
+      if (main) main.innerHTML = '<div class="no-type"><div class="no-type-inner"><div class="icon">👈</div><p>Select a location type<br>to manage its locations</p></div></div>';
+    } else {
+      renderLocationsList();
+    }
+  }
+}
+
+async function addMapTab() {
+  const name = prompt('New tab name:');
+  if (!name || !name.trim()) return;
+  await fetch('/api/map-tabs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: name.trim() }) });
+  mapTabs = await fetch('/api/map-tabs').then(r => r.json());
+  renderMapTabBar();
+  renderConfigTabsBar();
+}
+
+async function renameMapTab(id) {
+  const tab = mapTabs.find(t => t._id === id);
+  if (!tab || tab.isDefault) return;
+  const name = prompt('Rename tab:', tab.name);
+  if (!name || !name.trim()) return;
+  await fetch(`/api/map-tabs/${id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: name.trim() }) });
+  mapTabs = await fetch('/api/map-tabs').then(r => r.json());
+  renderMapTabBar();
+  renderConfigTabsBar();
+}
+
+async function deleteMapTab(id) {
+  const tab = mapTabs.find(t => t._id === id);
+  if (!tab || tab.isDefault) return;
+  if (!confirm(`Delete tab "${tab.name}"? Location types will be removed from this tab.`)) return;
+  await fetch(`/api/map-tabs/${id}`, { method: 'DELETE' });
+  if (activeMapTabId === id) activeMapTabId = 'default';
+  if (activeConfigTabId === id) activeConfigTabId = 'default';
+  await loadData();
+  renderCoverage();
+  renderBoundaryLayers();
+}
+
+// Tab assignment checkboxes HTML for location type forms
+function tabCheckboxesHtml(prefix, selectedTabIds) {
+  const sel = new Set(selectedTabIds || ['default']);
+  return `<label class="field-label">Show on tabs</label>
+    <div class="tab-checkboxes">${mapTabs.map(t =>
+      `<label><input type="checkbox" name="${prefix}-tabs" value="${t._id}" ${sel.has(t._id) ? 'checked' : ''}> ${escapeHtml(t.name)}</label>`
+    ).join('')}</div>`;
+}
+
+function readTabCheckboxes(prefix) {
+  const els = document.querySelectorAll(`input[name="${prefix}-tabs"]:checked`);
+  const ids = Array.from(els).map(e => e.value);
+  return ids.length ? ids : ['default'];
+}
+
+// ══════════════════════════════════
+// BOUNDARY LAYER HELPERS
+// ══════════════════════════════════
+function boundaryFieldOptions(type) {
+  let opts = '<option value="">(none)</option>';
+  if (!type.geojsonData) return opts;
+  try {
+    const data = typeof type.geojsonData === 'string' ? JSON.parse(type.geojsonData) : type.geojsonData;
+    const fields = new Set();
+    (data.features || []).forEach(f => {
+      if (f.properties) Object.entries(f.properties).forEach(([k, v]) => { if (typeof v === 'number') fields.add(k); });
+    });
+    fields.forEach(f => { opts += `<option value="${f}" ${f === type.colorByField ? 'selected' : ''}>${f}</option>`; });
+  } catch (e) {}
+  return opts;
+}
+
+async function handleBoundaryReupload(typeId, inputEl) {
+  const file = inputEl.files[0];
+  if (!file) return;
+  const status = document.getElementById('boundary-reupload-status');
+  const reader = new FileReader();
+  reader.onload = async (e) => {
+    try {
+      const data = JSON.parse(e.target.result);
+      if (!data.type || !data.features) throw new Error('Not a valid GeoJSON FeatureCollection');
+      await fetch(`/api/location-types/${typeId}`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ geojsonData: data })
+      });
+      if (status) { status.textContent = `Loaded ${data.features.length} feature(s)`; status.style.color = 'var(--success)'; }
+      await loadAll();
+      if (selectedTypeId === typeId) renderLocationsList();
+    } catch (err) {
+      if (status) { status.textContent = 'Error: ' + err.message; status.style.color = 'var(--danger)'; }
+    }
+  };
+  reader.readAsText(file);
+}
+
+async function saveBoundaryColorBy(typeId, value) {
+  await fetch(`/api/location-types/${typeId}`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ colorByField: value })
+  });
+  const t = locationTypes.find(x => x._id === typeId);
+  if (t) t.colorByField = value;
+  renderBoundaryLayers();
+}
+
+async function saveBoundaryColors(typeId) {
+  const low = document.getElementById('boundary-clow-edit')?.value || '#ffffcc';
+  const high = document.getElementById('boundary-chigh-edit')?.value || '#800026';
+  await fetch(`/api/location-types/${typeId}`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ colorScaleLow: low, colorScaleHigh: high })
+  });
+  const t = locationTypes.find(x => x._id === typeId);
+  if (t) { t.colorScaleLow = low; t.colorScaleHigh = high; }
+  const preview = document.getElementById('boundary-scale-preview-edit');
+  if (preview) preview.style.background = `linear-gradient(to right, ${low}, ${high})`;
+  renderBoundaryLayers();
+}
+
+async function saveBoundaryTabs(typeId) {
+  const tabIds = readTabCheckboxes('boundary-edit');
+  await fetch(`/api/location-types/${typeId}`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ tabIds })
+  });
+  const t = locationTypes.find(x => x._id === typeId);
+  if (t) t.tabIds = tabIds;
+  renderBoundaryLayers();
+  renderTypeList();
+}
+
+// ══════════════════════════════════
+// BOUNDARY LAYERS
+// ══════════════════════════════════
+function interpolateColor(low, high, t) {
+  const parse = c => [parseInt(c.slice(1,3),16), parseInt(c.slice(3,5),16), parseInt(c.slice(5,7),16)];
+  const [r1,g1,b1] = parse(low), [r2,g2,b2] = parse(high);
+  const r = Math.round(r1+(r2-r1)*t), g = Math.round(g1+(g2-g1)*t), b = Math.round(b1+(b2-b1)*t);
+  return `rgb(${r},${g},${b})`;
+}
+
+function renderBoundaryLayers() {
+  // Clear old boundary layers
+  Object.values(boundaryLayers).forEach(lg => { lg.clearLayers(); map.removeLayer(lg); });
+  boundaryLayers = {};
+
+  const visibleTypeIds = getVisibleTypeIds();
+  const boundaryTypes = locationTypes.filter(t => t.layerKind === 'boundary' && visibleTypeIds.has(t._id) && t.geojsonData);
+
+  boundaryTypes.forEach(type => {
+    const lg = L.layerGroup().addTo(map);
+    boundaryLayers[type._id] = lg;
+
+    let geojson;
+    try { geojson = typeof type.geojsonData === 'string' ? JSON.parse(type.geojsonData) : type.geojsonData; }
+    catch (e) { return; }
+
+    const colorByField = type.colorByField || '';
+    const colorLow = type.colorScaleLow || '#ffffcc';
+    const colorHigh = type.colorScaleHigh || '#800026';
+
+    // Compute value range for choropleth
+    let minVal = Infinity, maxVal = -Infinity;
+    if (colorByField && geojson.features) {
+      geojson.features.forEach(f => {
+        const v = f.properties && f.properties[colorByField];
+        if (typeof v === 'number' && isFinite(v)) {
+          if (v < minVal) minVal = v;
+          if (v > maxVal) maxVal = v;
+        }
+      });
+    }
+    const hasRange = isFinite(minVal) && isFinite(maxVal) && maxVal > minVal;
+
+    L.geoJSON(geojson, {
+      style: (feature) => {
+        let fillColor = type.color;
+        if (colorByField && hasRange) {
+          const v = feature.properties && feature.properties[colorByField];
+          if (typeof v === 'number' && isFinite(v)) {
+            const t2 = (v - minVal) / (maxVal - minVal);
+            fillColor = interpolateColor(colorLow, colorHigh, t2);
+          }
+        }
+        return { color: type.color, weight: 1.5, opacity: 0.8, fillColor, fillOpacity: 0.5 };
+      },
+      onEachFeature: (feature, layer) => {
+        if (!feature.properties) return;
+        const rows = Object.entries(feature.properties)
+          .filter(([k, v]) => v != null && v !== '')
+          .map(([k, v]) => `<tr><td>${escapeHtml(k)}</td><td>${escapeHtml(String(v))}</td></tr>`)
+          .join('');
+        if (rows) layer.bindPopup(`<div class="boundary-popup"><table>${rows}</table></div>`, { maxWidth: 350, maxHeight: 300 });
+      }
+    }).addTo(lg);
+  });
+}
+
+// GeoJSON file upload handler
+function handleGeoJsonUpload(inputEl, statusEl, prefix) {
+  const file = inputEl.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    try {
+      const data = JSON.parse(e.target.result);
+      if (!data.type || !data.features) throw new Error('Not a valid GeoJSON FeatureCollection');
+      window['_geojsonData_' + prefix] = data;
+      statusEl.textContent = `Loaded ${data.features.length} feature(s) from ${file.name}`;
+      // Populate colorBy field options
+      const fields = new Set();
+      data.features.forEach(f => {
+        if (f.properties) Object.entries(f.properties).forEach(([k, v]) => { if (typeof v === 'number') fields.add(k); });
+      });
+      const sel = document.getElementById(prefix + '-colorby');
+      if (sel) {
+        sel.innerHTML = '<option value="">(none)</option>' + Array.from(fields).map(f => `<option value="${f}">${f}</option>`).join('');
+      }
+    } catch (err) {
+      statusEl.textContent = 'Error: ' + err.message;
+      statusEl.style.color = 'var(--danger)';
+    }
+  };
+  reader.readAsText(file);
 }
 
 // ══════════════════════════════════
