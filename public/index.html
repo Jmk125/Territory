@@ -232,6 +232,14 @@
     .legend-locrow input { accent-color: var(--accent); flex-shrink: 0; }
     .legend-locrow span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .border-dot { width: 9px; height: 9px; border-radius: 50%; margin-left: auto; flex-shrink: 0; box-shadow: 0 0 0 1px rgba(0,0,0,0.35); }
+    .measure-tools { border-top: 1px solid var(--border); padding-top: 10px; margin-top: auto; display: flex; flex-direction: column; gap: 7px; }
+    .measure-tools.active .btn { border-color: var(--accent); color: var(--accent); }
+    .measure-readout { font-size: 0.78rem; color: var(--text2); line-height: 1.35; }
+    .measure-readout strong { color: var(--text); }
+    .measure-clear { background: none; border: none; color: var(--text2); cursor: pointer; padding: 0; font-size: 0.75rem; text-align: left; }
+    .measure-clear:hover { color: var(--danger); }
+    .measure-label { background: var(--surface); color: var(--text); border: 1px solid var(--accent); border-radius: 12px; padding: 2px 7px; font-size: 11px; font-weight: 700; box-shadow: 0 1px 5px rgba(0,0,0,0.35); }
+
 
     /* ── CONFIGURE PANEL ── */
     #panel-config {
@@ -555,6 +563,12 @@
     <div id="project-pin-list" class="project-pin-list"></div>
 
     <button class="btn btn-ghost btn-sm" onclick="refreshMap()" style="margin-top:4px;">↺ Refresh Coverage</button>
+
+    <div class="measure-tools" id="measure-tools">
+      <button class="btn btn-ghost btn-sm" id="measure-btn" onclick="toggleMeasureMode()" title="Click map points to measure rough distance in miles">📏 Measure distance</button>
+      <div class="measure-readout" id="measure-readout">Click Measure, then click two or more points on the map.</div>
+      <button class="measure-clear" id="measure-clear" onclick="clearMeasure()" style="display:none">Clear measurement</button>
+    </div>
   </div>
 </div>
 
@@ -653,7 +667,7 @@
 // ══════════════════════════════════
 // STATE
 // ══════════════════════════════════
-let map, coverageLayer, pinLayer, projectPinLayer, projectBubbleLayer, highlightLayer, selectionLayer;
+let map, coverageLayer, pinLayer, projectPinLayer, projectBubbleLayer, highlightLayer, selectionLayer, measureLayer;
 // Guards hover-highlight draws: an async polygon fetch is discarded if the
 // pointer has since left the row (or moved to another one).
 let highlightToken = 0;
@@ -663,6 +677,8 @@ let selectedLocId = null;
 let selectedExclusivePoly = null;
 let infoToken = 0;
 let pinDropMode = false;
+let measureMode = false;
+let measurePoints = [];
 let bubbleToken = 0;
 let locationTypes = [];
 let locations = [];
@@ -856,8 +872,14 @@ function initMap() {
   // highlightLayer (added last, so on top) holds the transient hover flashes.
   selectionLayer = L.layerGroup().addTo(map);
   highlightLayer = L.layerGroup().addTo(map);
+  measureLayer = L.layerGroup().addTo(map);
 
   map.on('click', (e) => {
+    if (measureMode && document.getElementById('panel-map').classList.contains('active')) {
+      addMeasurePoint(e.latlng);
+      return;
+    }
+
     // Drop-pin mode: next map click drops a draggable temporary project pin
     if (pinDropMode && document.getElementById('panel-map').classList.contains('active')) {
       addProjectPin(e.latlng.lat, e.latlng.lng, null, '');
@@ -919,6 +941,83 @@ function initMap() {
 
 function refreshMap() {
   loadAll();
+}
+
+
+// ── Rough distance measuring on the coverage map ──
+function toggleMeasureMode() {
+  measureMode = !measureMode;
+  if (measureMode && pinDropMode) togglePinDropMode();
+  updateMeasureUi();
+}
+
+function clearMeasure() {
+  measurePoints = [];
+  if (measureLayer) measureLayer.clearLayers();
+  updateMeasureUi();
+}
+
+function addMeasurePoint(latlng) {
+  measurePoints.push(latlng);
+  drawMeasurement();
+  updateMeasureUi();
+}
+
+function drawMeasurement() {
+  if (!measureLayer) return;
+  measureLayer.clearLayers();
+  if (!measurePoints.length) return;
+
+  measurePoints.forEach((pt, idx) => {
+    L.circleMarker(pt, {
+      radius: 5,
+      color: '#ffffff',
+      weight: 2,
+      fillColor: '#4f8cff',
+      fillOpacity: 1
+    }).bindTooltip(String(idx + 1), {
+      permanent: true,
+      direction: 'center',
+      className: 'measure-label'
+    }).addTo(measureLayer);
+  });
+
+  if (measurePoints.length > 1) {
+    L.polyline(measurePoints, {
+      color: '#4f8cff',
+      weight: 3,
+      opacity: 0.95,
+      dashArray: '8 6'
+    }).addTo(measureLayer);
+  }
+}
+
+function updateMeasureUi() {
+  const tools = document.getElementById('measure-tools');
+  const btn = document.getElementById('measure-btn');
+  const readout = document.getElementById('measure-readout');
+  const clearBtn = document.getElementById('measure-clear');
+  if (tools) tools.classList.toggle('active', measureMode);
+  if (btn) btn.textContent = measureMode ? '📏 Measuring… click map points' : '📏 Measure distance';
+  if (clearBtn) clearBtn.style.display = measurePoints.length ? 'block' : 'none';
+  if (!readout) return;
+
+  const miles = measureDistanceMiles(measurePoints);
+  if (!measureMode && !measurePoints.length) {
+    readout.textContent = 'Click Measure, then click two or more points on the map.';
+  } else if (measurePoints.length < 2) {
+    readout.innerHTML = measureMode
+      ? 'Click a starting point, then another point to measure rough miles.'
+      : 'Measurement started. Click Measure to continue adding points.';
+  } else {
+    readout.innerHTML = `<strong>${miles.toFixed(2)} miles</strong> rough distance across ${measurePoints.length} points.${measureMode ? ' Click more points to extend.' : ''}`;
+  }
+}
+
+function measureDistanceMiles(points) {
+  let total = 0;
+  for (let i = 1; i < points.length; i++) total += points[i - 1].distanceTo(points[i]);
+  return total / 1609.344;
 }
 
 // ── Collapsible coverage pane (slides horizontally off the right edge) ──
