@@ -222,6 +222,9 @@
     .legend-swatch.clickable:hover { transform: scale(1.2); box-shadow: 0 0 0 2px var(--surface), 0 0 0 3px currentColor; }
     .legend-combined { display: flex; align-items: center; gap: 8px; font-size: 0.8rem; cursor: pointer; }
     .legend-combined input[type=checkbox] { accent-color: var(--accent); }
+    .combined-settings { margin-top: 8px; padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface2); }
+    .combined-settings input[type=range] { accent-color: var(--accent); }
+    .combined-settings .val-badge { font-weight: 700; color: var(--text); }
     .legend-type { display: flex; flex-direction: column; }
     .legend-name { flex: 1; }
     .legend-filter-btn { background: none; border: none; color: var(--text2); cursor: pointer; padding: 2px 4px; border-radius: 4px; display: inline-flex; align-items: center; gap: 2px; }
@@ -618,8 +621,19 @@
 
     <div class="section-divider">Combined View</div>
     <div class="legend-combined">
-      <input type="checkbox" id="show-combined" onchange="renderCoverage()">
+      <input type="checkbox" id="show-combined" onchange="onCombinedToggle()">
       <label for="show-combined" style="cursor:pointer; font-size:0.8rem;">Show all types combined</label>
+    </div>
+    <div id="combined-settings" class="combined-settings" style="display:none">
+      <div class="row" style="gap:8px; align-items:center">
+        <label class="field-label" style="margin-bottom:0">Color</label>
+        <input type="color" id="combined-color" value="#a78bfa" oninput="saveCombinedSettings(); renderCoverage()">
+        <div style="flex:1">
+          <label class="field-label" style="margin-bottom:2px">Opacity <span class="val-badge" id="combined-opacity-val">0.35</span></label>
+          <input type="range" id="combined-opacity" min="0.05" max="1" step="0.05" value="0.35" oninput="saveCombinedSettings(); renderCoverage()" style="width:100%">
+        </div>
+      </div>
+      <div class="hint" id="combined-mode-hint" style="margin-top:4px"></div>
     </div>
 
     <div id="approx-note" class="hint" style="display:none; margin-top:6px; color:var(--accent2);"></div>
@@ -737,6 +751,11 @@ let expandedTypeIds = new Set();
 let filterGroups = [];
 let fgExpanded = new Set();   // which types are expanded in the filter-groups editor
 
+// Appearance of the "show all types combined" overlay (single color + opacity),
+// applied to both the merged blob and the combined heat map. Persisted.
+let combinedColor = '#a78bfa';
+let combinedOpacity = 0.35;
+
 // Cache of computed turf polygons per location, keyed by id+coords+range
 let locPolyCache = {};
 
@@ -811,6 +830,7 @@ async function boot() {
   loadHidden();
   loadFiltered();
   loadFilterGroups();
+  loadCombinedSettings();
   progressSet(0);
   await loadData();
   await prefetchCoverage();
@@ -1377,6 +1397,49 @@ function loadExcluded() {
 }
 function saveExcluded() {
   localStorage.setItem('excludedLocIds', JSON.stringify([...excludedLocIds]));
+}
+
+// ── Combined-overlay appearance (color + opacity of the "all types combined"
+// blob / heat map) ──────────────────────────────────────────────────────────
+function loadCombinedSettings() {
+  try {
+    const s = JSON.parse(localStorage.getItem('combinedSettings') || '{}');
+    if (s.color) combinedColor = s.color;
+    if (s.opacity != null) combinedOpacity = s.opacity;
+  } catch (e) { /* keep defaults */ }
+  const c = document.getElementById('combined-color');
+  const o = document.getElementById('combined-opacity');
+  if (c) c.value = combinedColor;
+  if (o) o.value = combinedOpacity;
+  updateCombinedSettingsUi();
+}
+function saveCombinedSettings() {
+  const c = document.getElementById('combined-color');
+  const o = document.getElementById('combined-opacity');
+  if (c) combinedColor = c.value;
+  if (o) combinedOpacity = parseFloat(o.value);
+  localStorage.setItem('combinedSettings', JSON.stringify({ color: combinedColor, opacity: combinedOpacity }));
+  updateCombinedSettingsUi();
+}
+// Keep the opacity badge + the little mode hint in sync.
+function updateCombinedSettingsUi() {
+  const badge = document.getElementById('combined-opacity-val');
+  if (badge) badge.textContent = Number(combinedOpacity).toFixed(2);
+  const hint = document.getElementById('combined-mode-hint');
+  if (hint) {
+    const mode = document.querySelector('input[name="cov-mode"]:checked')?.value || 'merged';
+    hint.textContent = mode === 'heat'
+      ? 'Heat Map: overlapping coverage stacks and darkens in this color.'
+      : 'Merged: one solid blob in this color.';
+  }
+}
+// Checkbox handler: reveal the color/opacity settings only while combined is on.
+function onCombinedToggle() {
+  const on = document.getElementById('show-combined')?.checked;
+  const box = document.getElementById('combined-settings');
+  if (box) box.style.display = on ? 'block' : 'none';
+  if (on) updateCombinedSettingsUi();
+  renderCoverage();
 }
 
 // Called when a legend toggle changes — keep pins and coverage in sync
@@ -3570,6 +3633,7 @@ async function renderCoverage() {
   coverageLayer.clearLayers();
   const mode = document.querySelector('input[name="cov-mode"]:checked')?.value || 'merged';
   const showCombined = document.getElementById('show-combined')?.checked;
+  updateCombinedSettingsUi();   // keep the merged/heat hint current
 
   // Build coverage polygons for visible, non-excluded locations, advancing the
   // progress bar as each isochrone resolves.
@@ -3593,13 +3657,23 @@ async function renderCoverage() {
   });
 
   if (showCombined) {
-    // Combined mode: union ALL visible shapes across ALL types → one single merged blob
-    const allPolygons = isoResults.map(item => item.poly);
-    const combinedUnion = unionAll(allPolygons);
-    if (combinedUnion) {
-      L.geoJSON(combinedUnion, {
-        style: { color: '#a78bfa', fillColor: '#a78bfa', fillOpacity: 0.35, weight: 2.5, opacity: 0.85 }
-      }).addTo(coverageLayer);
+    // Combined mode: everything in one color. Honor the chosen color/opacity.
+    if (mode === 'heat') {
+      // Combined heat map: draw each location individually so overlaps stack and
+      // darken — but all in the single combined color (fill only, no borders).
+      isoResults.forEach(item => {
+        L.geoJSON(item.poly, {
+          style: { stroke: false, weight: 0, fill: true, fillColor: combinedColor, fillOpacity: combinedOpacity }
+        }).addTo(coverageLayer);
+      });
+    } else {
+      // Merged: union ALL visible shapes across ALL types → one single blob.
+      const combinedUnion = unionAll(isoResults.map(item => item.poly));
+      if (combinedUnion) {
+        L.geoJSON(combinedUnion, {
+          style: { color: combinedColor, fillColor: combinedColor, fillOpacity: combinedOpacity, weight: 2.5, opacity: 0.85 }
+        }).addTo(coverageLayer);
+      }
     }
 
   } else if (mode === 'heat') {
