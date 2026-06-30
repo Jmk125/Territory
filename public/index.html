@@ -449,6 +449,22 @@
     .batch-summary.ok { color: var(--success); }
     .batch-summary.warn { color: var(--accent2); }
 
+    /* ── BATCH REVIEW (multi-type import) ── */
+    .rv-cards { display: flex; flex-direction: column; gap: 10px; }
+    .rv-card { border: 1px solid var(--border); border-radius: var(--radius); padding: 10px; background: var(--surface2); }
+    .rv-card-head { display: flex; align-items: center; gap: 8px; }
+    .rv-card-head input[type=color] { width: 34px; height: 32px; }
+    .rv-name-input { flex: 1; font-weight: 700; }
+    .rv-count { font-size: 0.74rem; color: var(--text2); white-space: nowrap; }
+    .rv-locs { margin-top: 8px; }
+    .rv-locs > summary { font-size: 0.76rem; color: var(--text2); cursor: pointer; }
+    .rv-locs-list { max-height: 150px; overflow: auto; margin-top: 6px; border: 1px solid var(--border); border-radius: var(--radius); }
+    .rv-loc { display: flex; justify-content: space-between; gap: 10px; padding: 4px 8px; font-size: 0.76rem; border-bottom: 1px solid var(--border); }
+    .rv-loc:last-child { border-bottom: none; }
+    .rv-loc-name { font-weight: 600; white-space: nowrap; }
+    .rv-loc-addr { color: var(--text2); text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .rv-custom { margin-top: 10px; border-top: 1px dashed var(--border); padding-top: 10px; }
+
     /* ── MAP TAB BAR ── */
     .map-tab-bar { display: flex; align-items: center; gap: 2px; padding: 0 12px; background: var(--surface); border-bottom: 1px solid var(--border); flex-shrink: 0; min-height: 36px; }
     .map-tab-btn { padding: 7px 14px; background: none; border: none; color: var(--text2); font-size: 0.8rem; font-weight: 600; cursor: pointer; border-bottom: 2px solid transparent; transition: all 0.15s; }
@@ -1607,16 +1623,28 @@ function closeLocationInfo() {
   if (panel) panel.style.display = 'none';
 }
 
-// ── New Type modal (type details + batch location import) ──────────
+// ── New Type modal + batch location import ─────────────────────────
 // Staged spreadsheet for the batch importer: an array-of-arrays of the first
 // sheet, indexed so batchSheet[r-1] is spreadsheet row r (1-based, as the user
-// sees it in Excel). Cleared whenever the modal opens or closes.
+// sees it in Excel). Cleared whenever an importer opens or closes.
+//
+// Two batch flows share this machinery and the same `bx-*` field ids (only one
+// importer is ever mounted at a time):
+//   • mode 'multi'  — in the Add New Type modal. The sheet has a Location Type
+//                     column, so rows can span several NEW types. Harvested rows
+//                     go to a review window that creates each type + its rows.
+//   • mode 'single' — opened from a type's Add Location form. No type column;
+//                     every row is imported into the type already being viewed.
 let batchSheet = null;
 let batchFileName = '';
+let batchMode = 'multi';            // 'multi' | 'single'
+let batchReviewGroups = [];        // [{ typeName, color, locations:[...] }]
+let batchMapping = null;           // remembered column mapping for the review "Back" button
 
-function openNewTypeModal() {
-  batchSheet = null;
-  batchFileName = '';
+function openNewTypeModal(opts = {}) {
+  const keepBatch = opts.keepBatch && batchSheet;
+  if (!keepBatch) { batchSheet = null; batchFileName = ''; }
+  batchMode = 'multi';
   delete window['_geojsonData_nt'];
   openModal('🏷 Add New Type', newTypeModalHtml(), { wide: true });
   // Bubble-style controls and the tab assignment are built fresh each open so
@@ -1628,13 +1656,19 @@ function openNewTypeModal() {
   if (tabHost) tabHost.innerHTML = tabCheckboxesHtml('nt', [activeConfigTabId || 'default']);
   toggleNewTypeKind();
   updateStylePreview('nt');
+  // Returning from the review window: restore the staged file + column mapping
+  // so the user doesn't have to re-upload or re-type anything.
+  if (keepBatch) {
+    restoreBatchState();
+    switchNewTypeTab('batch');
+  }
 }
 
 function newTypeModalHtml() {
   return `
     <div class="modal-tabs">
-      <button class="modal-tab active" id="ntmt-details" onclick="switchNewTypeTab('details')">Type Details</button>
-      <button class="modal-tab" id="ntmt-batch" onclick="switchNewTypeTab('batch')">Batch Add Locations <span class="tab-badge" id="nt-batch-badge" style="display:none">0</span></button>
+      <button class="modal-tab active" id="ntmt-details" onclick="switchNewTypeTab('details')">Single Type</button>
+      <button class="modal-tab" id="ntmt-batch" onclick="switchNewTypeTab('batch')">Batch from File <span class="tab-badge" id="nt-batch-badge" style="display:none">0</span></button>
     </div>
 
     <div id="ntpane-details">
@@ -1691,35 +1725,18 @@ function newTypeModalHtml() {
       </div>
       <div class="section-divider" style="margin-top:14px">Show on map tabs</div>
       <div id="nt-tab-checkboxes"></div>
+      <div class="row" style="margin-top:18px; gap:8px; border-top:1px solid var(--border); padding-top:14px">
+        <button class="btn btn-success" onclick="addLocationType()">+ Add Type</button>
+        <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
+      </div>
     </div>
 
     <div id="ntpane-batch" style="display:none">
-      <div class="batch-hint">Upload a geocoded spreadsheet or CSV, then map the columns. Matching rows become locations of this new type and are plotted as soon as the type is created. <strong>Boundary types don't take point locations.</strong></div>
-      <div class="geojson-upload">
-        <label class="upload-btn">📂 Upload spreadsheet / CSV
-          <input type="file" id="nt-batch-file" accept=".csv,.xlsx,.xls" onchange="handleBatchFile(this)">
-        </label>
-        <div class="upload-status" id="nt-batch-status"></div>
+      ${batchConfigHtml('multi')}
+      <div class="row" style="margin-top:18px; gap:8px; border-top:1px solid var(--border); padding-top:14px">
+        <button class="btn btn-success" id="bx-action" disabled style="opacity:0.5" onclick="openBatchReview()">Review &amp; Customize →</button>
+        <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
       </div>
-      <div id="nt-batch-config" style="display:none; margin-top:12px">
-        <div class="batch-grid">
-          <div><label class="field-label">Start row</label><input type="number" id="nt-batch-start" min="1" oninput="renderBatchPreview()"></div>
-          <div><label class="field-label">End row</label><input type="number" id="nt-batch-end" min="1" oninput="renderBatchPreview()"></div>
-          <div><label class="field-label">Name column</label><input type="text" id="nt-batch-name" placeholder="e.g. A" oninput="renderBatchPreview()"></div>
-          <div><label class="field-label">Address column(s)</label><input type="text" id="nt-batch-addr" placeholder="e.g. C,B or F-H" oninput="renderBatchPreview()"></div>
-          <div><label class="field-label">Latitude column</label><input type="text" id="nt-batch-lat" placeholder="e.g. K" oninput="renderBatchPreview()"></div>
-          <div><label class="field-label">Longitude column</label><input type="text" id="nt-batch-lng" placeholder="e.g. L" oninput="renderBatchPreview()"></div>
-        </div>
-        <div class="batch-hint">Use spreadsheet column letters (A, B, C…). Address accepts a list or range to combine split fields — e.g. <code>C,B</code> joins street number then street name; <code>F-H</code> joins F, G, H in order.</div>
-        <div class="section-divider" style="margin-top:12px">Sheet preview <span class="hint" id="nt-batch-fname"></span></div>
-        <div class="batch-preview-wrap" id="nt-batch-preview"></div>
-        <div id="nt-batch-summary"></div>
-      </div>
-    </div>
-
-    <div class="row" style="margin-top:18px; gap:8px; border-top:1px solid var(--border); padding-top:14px">
-      <button class="btn btn-success" id="nt-create-btn" onclick="addLocationType()">+ Add Type</button>
-      <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
     </div>`;
 }
 
@@ -1728,6 +1745,202 @@ function switchNewTypeTab(tab) {
   document.getElementById('ntpane-batch').style.display = tab === 'batch' ? 'block' : 'none';
   document.getElementById('ntmt-details').classList.toggle('active', tab === 'details');
   document.getElementById('ntmt-batch').classList.toggle('active', tab === 'batch');
+}
+
+// Shared markup for the column-mapping importer. `mode` 'multi' adds the
+// Location Type column; 'single' omits it. The action button is supplied by the
+// caller (Review → for multi, Import for single).
+function batchConfigHtml(mode) {
+  const typeField = mode === 'multi'
+    ? `<div><label class="field-label">Location Type column *</label><input type="text" id="bx-type" placeholder="e.g. A" oninput="renderBatchPreview()"></div>`
+    : '';
+  const intro = mode === 'multi'
+    ? 'Upload a geocoded spreadsheet or CSV that may contain several location types. Map the columns below — each distinct value in the <strong>Location Type</strong> column becomes a new type you can style on the next screen.'
+    : 'Upload a geocoded spreadsheet or CSV. Matching rows are added to this type and plotted immediately.';
+  return `
+    <div class="batch-hint">${intro}</div>
+    <div class="geojson-upload">
+      <label class="upload-btn">📂 Upload spreadsheet / CSV
+        <input type="file" id="bx-file" accept=".csv,.xlsx,.xls" onchange="handleBatchFile(this)">
+      </label>
+      <div class="upload-status" id="bx-status"></div>
+    </div>
+    <div id="bx-config" style="display:none; margin-top:12px">
+      <div class="batch-grid">
+        <div><label class="field-label">Start row</label><input type="number" id="bx-start" min="1" oninput="renderBatchPreview()"></div>
+        <div><label class="field-label">End row</label><input type="number" id="bx-end" min="1" oninput="renderBatchPreview()"></div>
+        ${typeField}
+        <div><label class="field-label">Name column *</label><input type="text" id="bx-name" placeholder="e.g. B" oninput="renderBatchPreview()"></div>
+        <div><label class="field-label">Address column(s)</label><input type="text" id="bx-addr" placeholder="e.g. C,B or F-H" oninput="renderBatchPreview()"></div>
+        <div><label class="field-label">Latitude column *</label><input type="text" id="bx-lat" placeholder="e.g. K" oninput="renderBatchPreview()"></div>
+        <div><label class="field-label">Longitude column *</label><input type="text" id="bx-lng" placeholder="e.g. L" oninput="renderBatchPreview()"></div>
+      </div>
+      <div class="batch-hint">Use spreadsheet column letters (A, B, C…). Address accepts a list or range to combine split fields — e.g. <code>C,B</code> joins street number then street name; <code>F-H</code> joins F, G, H in order.</div>
+      <div class="section-divider" style="margin-top:12px">Sheet preview <span class="hint" id="bx-fname"></span></div>
+      <div class="batch-preview-wrap" id="bx-preview"></div>
+      <div id="bx-summary"></div>
+    </div>`;
+}
+
+// Snapshot the current column mapping (used to restore the batch tab after the
+// user steps into the review window and comes back).
+function snapshotBatchMapping() {
+  const v = id => { const el = document.getElementById(id); return el ? el.value : ''; };
+  batchMapping = { start: v('bx-start'), end: v('bx-end'), type: v('bx-type'),
+    name: v('bx-name'), addr: v('bx-addr'), lat: v('bx-lat'), lng: v('bx-lng') };
+}
+
+function restoreBatchState() {
+  if (!batchSheet) return;
+  const status = document.getElementById('bx-status');
+  if (status) { status.style.color = 'var(--success)'; status.textContent = `Loaded ${batchSheet.length} row(s) from ${batchFileName}`; }
+  const fname = document.getElementById('bx-fname'); if (fname) fname.textContent = batchFileName;
+  const cfg = document.getElementById('bx-config'); if (cfg) cfg.style.display = 'block';
+  if (batchMapping) {
+    const set = (id, val) => { const el = document.getElementById(id); if (el) el.value = val; };
+    set('bx-start', batchMapping.start); set('bx-end', batchMapping.end); set('bx-type', batchMapping.type);
+    set('bx-name', batchMapping.name); set('bx-addr', batchMapping.addr);
+    set('bx-lat', batchMapping.lat); set('bx-lng', batchMapping.lng);
+  }
+  renderBatchPreview();
+}
+
+// ── Review window: group harvested rows by their type column, auto-assign
+// distinct colors, and let the user rename/recolor/restyle each type before
+// everything is created. ───────────────────────────────────────────────────
+function openBatchReview() {
+  const res = buildBatchRows();
+  if (res.incomplete || !res.rows.length) return;
+  snapshotBatchMapping();
+  // Group by type value, preserving first-seen order.
+  const groups = new Map();
+  for (const row of res.rows) {
+    if (!groups.has(row.typeName)) groups.set(row.typeName, []);
+    groups.get(row.typeName).push(row);
+  }
+  const names = [...groups.keys()];
+  const colors = randomColors(names.length);
+  batchReviewGroups = names.map((nm, i) => ({ typeName: nm, color: colors[i], locations: groups.get(nm) }));
+  openModal('🎨 Review Import', batchReviewHtml(), { wide: true });
+  const tabHost = document.getElementById('rv-tab-checkboxes');
+  if (tabHost) tabHost.innerHTML = tabCheckboxesHtml('rv', [activeConfigTabId || 'default']);
+}
+
+function batchReviewHtml() {
+  const totalLocs = batchReviewGroups.reduce((s, g) => s + g.locations.length, 0);
+  const cards = batchReviewGroups.map((g, i) => {
+    const locsList = g.locations.map(l =>
+      `<div class="rv-loc"><span class="rv-loc-name">${escapeHtml(l.name)}</span><span class="rv-loc-addr">${escapeHtml(l.address || (l.lat.toFixed(4) + ', ' + l.lng.toFixed(4)))}</span></div>`).join('');
+    return `<div class="rv-card">
+      <div class="rv-card-head">
+        <input type="color" id="rv${i}-color" value="${g.color}" oninput="updateStylePreview('rv${i}')" title="Type color">
+        <input type="text" id="rv${i}-name" class="rv-name-input" value="${escapeHtml(g.typeName)}">
+        <span class="rv-count">${g.locations.length} loc${g.locations.length !== 1 ? 's' : ''}</span>
+        <button class="btn btn-ghost btn-sm" id="rv${i}-toggle" onclick="toggleReviewDetails(${i})">Customize ▸</button>
+      </div>
+      <details class="rv-locs"><summary>Show ${g.locations.length} location(s)</summary><div class="rv-locs-list">${locsList}</div></details>
+      <div class="rv-custom" id="rv${i}-custom" style="display:none">
+        <div class="row" style="gap:8px; align-items:flex-end; margin-top:6px">
+          <div style="flex:1">
+            <label class="field-label">Default coverage</label>
+            <div class="row" style="gap:4px">
+              <input type="number" id="rv${i}-radius" value="60" min="1" max="300" style="flex:1">
+              <select id="rv${i}-unit" style="flex:1; padding:8px 6px;"><option value="minutes">min</option><option value="miles">mi</option></select>
+            </div>
+          </div>
+        </div>
+        <div class="section-divider" style="margin-top:10px">Bubble style</div>
+        <div class="style-controls boxed">${styleControlsHtml('rv' + i, 'rv' + i + '-color')}</div>
+      </div>
+    </div>`;
+  }).join('');
+  return `
+    <div class="batch-hint">Found <strong>${batchReviewGroups.length}</strong> location type(s) and <strong>${totalLocs}</strong> location(s). Each type got a random color and default settings — adjust any of them, then create.</div>
+    <div class="rv-cards">${cards}</div>
+    <div class="section-divider" style="margin-top:14px">Show on map tabs</div>
+    <div id="rv-tab-checkboxes"></div>
+    <div class="row" style="margin-top:18px; gap:8px; border-top:1px solid var(--border); padding-top:14px">
+      <button class="btn btn-success" onclick="createTypesFromReview()">✓ Create ${batchReviewGroups.length} type(s) &amp; ${totalLocs} location(s)</button>
+      <button class="btn btn-ghost" onclick="openNewTypeModal({keepBatch:true})">‹ Back</button>
+    </div>`;
+}
+
+function toggleReviewDetails(i) {
+  const el = document.getElementById('rv' + i + '-custom');
+  const btn = document.getElementById('rv' + i + '-toggle');
+  const open = el.style.display === 'none';
+  el.style.display = open ? 'block' : 'none';
+  if (btn) btn.textContent = open ? 'Customize ▾' : 'Customize ▸';
+  if (open) updateStylePreview('rv' + i);
+}
+
+async function createTypesFromReview() {
+  const tabIds = readTabCheckboxes('rv');
+  let createdTypeId = null, totalLocs = 0;
+  for (let i = 0; i < batchReviewGroups.length; i++) {
+    const g = batchReviewGroups[i];
+    const name = (document.getElementById('rv' + i + '-name').value.trim()) || g.typeName;
+    const color = document.getElementById('rv' + i + '-color').value;
+    const radius = parseInt(document.getElementById('rv' + i + '-radius').value) || 60;
+    const unit = document.getElementById('rv' + i + '-unit').value;
+    const style = readStyleInputs('rv' + i);
+    const newType = await fetch('/api/location-types', { method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ name, color, layerKind: 'isochrone', tabIds, defaultRadius: radius, defaultRadiusUnit: unit, ...stylePayload(style) }) })
+      .then(r => r.json()).catch(() => null);
+    if (!newType || !newType._id) continue;
+    createdTypeId = newType._id;
+    const payload = g.locations.map(l => ({ name: l.name, address: l.address, lat: l.lat, lng: l.lng, typeId: newType._id }));
+    const resp = await fetch('/api/locations/bulk', { method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ locations: payload }) }).then(r => r.json()).catch(() => null);
+    totalLocs += (resp && resp.inserted) || 0;
+  }
+  batchReviewGroups = []; batchSheet = null; batchFileName = ''; batchMapping = null;
+  closeModal();
+  if (createdTypeId) selectedTypeId = createdTypeId;
+  await loadAll();
+  console.log(`Imported ${totalLocs} location(s).`);
+}
+
+// n visually-distinct colors: hues spread evenly around the wheel from a random
+// offset, then lightly shuffled so adjacent types don't read as a gradient.
+function randomColors(n) {
+  const out = [];
+  const offset = Math.random() * 360;
+  for (let i = 0; i < n; i++) out.push(hslToHex((offset + i * (360 / Math.max(1, n))) % 360, 65, 55));
+  for (let i = out.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [out[i], out[j]] = [out[j], out[i]]; }
+  return out;
+}
+function hslToHex(h, s, l) {
+  s /= 100; l /= 100;
+  const k = n => (n + h / 30) % 12;
+  const a = s * Math.min(l, 1 - l);
+  const f = n => { const c = l - a * Math.max(-1, Math.min(k(n) - 3, Math.min(9 - k(n), 1))); return Math.round(255 * c).toString(16).padStart(2, '0'); };
+  return '#' + f(0) + f(8) + f(4);
+}
+
+// ── Single-type batch importer (opened from a type's Add Location form) ──────
+function openSingleBatchImporter(typeId) {
+  batchSheet = null; batchFileName = ''; batchMode = 'single';
+  const type = locationTypes.find(t => t._id === typeId);
+  openModal('📂 Batch Add Locations' + (type ? ' — ' + escapeHtml(type.name) : ''), `
+    ${batchConfigHtml('single')}
+    <div class="row" style="margin-top:18px; gap:8px; border-top:1px solid var(--border); padding-top:14px">
+      <button class="btn btn-success" id="bx-action" disabled style="opacity:0.5" onclick="confirmSingleBatch('${typeId}')">+ Import Locations</button>
+      <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
+    </div>`, { wide: true });
+}
+
+async function confirmSingleBatch(typeId) {
+  const res = buildBatchRows();
+  if (res.incomplete || !res.rows.length) return;
+  const payload = res.rows.map(l => ({ name: l.name, address: l.address, lat: l.lat, lng: l.lng, typeId }));
+  const resp = await fetch('/api/locations/bulk', { method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ locations: payload }) }).then(r => r.json()).catch(() => null);
+  batchSheet = null; batchFileName = '';
+  closeModal();
+  selectedTypeId = typeId;
+  await loadAll();
+  console.log(`Imported ${(resp && resp.inserted) || 0} location(s).`);
 }
 
 // ── Column-letter helpers ──────────────────────────────────────────
@@ -1806,7 +2019,7 @@ function parseCsv(text) {
 function handleBatchFile(input) {
   const file = input.files[0];
   if (!file) return;
-  const status = document.getElementById('nt-batch-status');
+  const status = document.getElementById('bx-status');
   status.style.color = 'var(--text2)';
   status.textContent = 'Reading…';
   const isCsv = /\.csv$/i.test(file.name) || file.type === 'text/csv';
@@ -1828,11 +2041,11 @@ function handleBatchFile(input) {
       batchFileName = file.name;
       status.style.color = 'var(--success)';
       status.textContent = `Loaded ${batchSheet.length} row(s) from ${file.name}`;
-      document.getElementById('nt-batch-fname').textContent = batchFileName;
-      document.getElementById('nt-batch-config').style.display = 'block';
+      document.getElementById('bx-fname').textContent = batchFileName;
+      document.getElementById('bx-config').style.display = 'block';
       // Sensible defaults: skip a header row if present; import to the last row.
-      const startEl = document.getElementById('nt-batch-start');
-      const endEl = document.getElementById('nt-batch-end');
+      const startEl = document.getElementById('bx-start');
+      const endEl = document.getElementById('bx-end');
       if (!startEl.value) startEl.value = looksLikeHeader(batchSheet[0]) ? 2 : 1;
       if (!endEl.value) endEl.value = batchSheet.length;
       renderBatchPreview();
@@ -1840,8 +2053,8 @@ function handleBatchFile(input) {
       batchSheet = null;
       status.style.color = 'var(--danger)';
       status.textContent = 'Error: ' + err.message;
-      document.getElementById('nt-batch-config').style.display = 'none';
-      updateBatchBadge(0);
+      document.getElementById('bx-config').style.display = 'none';
+      updateBatchUi({ incomplete: true, rows: [] });
     }
   };
   if (isCsv) reader.readAsText(file);
@@ -1849,19 +2062,25 @@ function handleBatchFile(input) {
 }
 
 // Build the importable location rows from the staged sheet + current column
-// mapping. Skips rows missing a name or valid coordinates and reports the count.
+// mapping. In 'multi' mode each row also carries its typeName (read from the
+// Location Type column). Rows missing a name, valid coordinates, or — in multi
+// mode — a type value are skipped and counted.
 function buildBatchRows() {
-  if (!batchSheet) return { rows: [], skipped: 0, total: 0 };
-  const nameIdx = colLetterToIndex(document.getElementById('nt-batch-name').value);
-  const addrIdxs = parseColumnSpec(document.getElementById('nt-batch-addr').value);
-  const latIdx = colLetterToIndex(document.getElementById('nt-batch-lat').value);
-  const lngIdx = colLetterToIndex(document.getElementById('nt-batch-lng').value);
-  const startRaw = parseInt(document.getElementById('nt-batch-start').value, 10);
-  const endRaw = parseInt(document.getElementById('nt-batch-end').value, 10);
+  if (!batchSheet) return { rows: [], skipped: 0, total: 0, types: 0 };
+  const g = id => document.getElementById(id);
+  const hasType = !!g('bx-type');
+  const typeIdx = hasType ? colLetterToIndex(g('bx-type').value) : -1;
+  const nameIdx = colLetterToIndex(g('bx-name').value);
+  const addrIdxs = parseColumnSpec(g('bx-addr').value);
+  const latIdx = colLetterToIndex(g('bx-lat').value);
+  const lngIdx = colLetterToIndex(g('bx-lng').value);
+  const startRaw = parseInt(g('bx-start').value, 10);
+  const endRaw = parseInt(g('bx-end').value, 10);
   const s = startRaw >= 1 ? startRaw : 1;
   const e = endRaw >= 1 ? Math.min(endRaw, batchSheet.length) : batchSheet.length;
-  if (nameIdx < 0 || latIdx < 0 || lngIdx < 0) return { rows: [], skipped: 0, total: Math.max(0, e - s + 1), incomplete: true };
-  const rows = []; let skipped = 0, total = 0;
+  if (nameIdx < 0 || latIdx < 0 || lngIdx < 0 || (hasType && typeIdx < 0))
+    return { rows: [], skipped: 0, total: Math.max(0, e - s + 1), types: 0, incomplete: true };
+  const rows = []; const typeSet = new Set(); let skipped = 0, total = 0;
   for (let r = s; r <= e; r++) {
     const arr = batchSheet[r - 1];
     if (!arr) continue;
@@ -1870,23 +2089,28 @@ function buildBatchRows() {
     const address = addrIdxs.map(i => String(arr[i] ?? '').trim()).filter(Boolean).join(' ');
     const lat = parseFloat(arr[latIdx]);
     const lng = parseFloat(arr[lngIdx]);
-    if (!name || !isFinite(lat) || !isFinite(lng) || lat < -90 || lat > 90 || lng < -180 || lng > 180) { skipped++; continue; }
-    rows.push({ name, address, lat, lng });
+    const typeName = hasType ? String(arr[typeIdx] ?? '').trim() : null;
+    const badCoord = !isFinite(lat) || !isFinite(lng) || lat < -90 || lat > 90 || lng < -180 || lng > 180;
+    if (!name || badCoord || (hasType && !typeName)) { skipped++; continue; }
+    rows.push({ typeName, name, address, lat, lng });
+    if (hasType) typeSet.add(typeName);
   }
-  return { rows, skipped, total };
+  return { rows, skipped, total, types: typeSet.size };
 }
 
 function renderBatchPreview() {
   if (!batchSheet) return;
-  const wrap = document.getElementById('nt-batch-preview');
-  const nameIdx = colLetterToIndex(document.getElementById('nt-batch-name').value);
-  const addrIdxs = new Set(parseColumnSpec(document.getElementById('nt-batch-addr').value));
-  const latIdx = colLetterToIndex(document.getElementById('nt-batch-lat').value);
-  const lngIdx = colLetterToIndex(document.getElementById('nt-batch-lng').value);
-  const start = parseInt(document.getElementById('nt-batch-start').value, 10);
-  const end = parseInt(document.getElementById('nt-batch-end').value, 10);
+  const g = id => document.getElementById(id);
+  const hasType = !!g('bx-type');
+  const typeIdx = hasType ? colLetterToIndex(g('bx-type').value) : -1;
+  const nameIdx = colLetterToIndex(g('bx-name').value);
+  const addrIdxs = new Set(parseColumnSpec(g('bx-addr').value));
+  const latIdx = colLetterToIndex(g('bx-lat').value);
+  const lngIdx = colLetterToIndex(g('bx-lng').value);
+  const start = parseInt(g('bx-start').value, 10);
+  const end = parseInt(g('bx-end').value, 10);
   const colCount = batchSheet.reduce((m, r) => Math.max(m, r ? r.length : 0), 0);
-  const hit = i => i === nameIdx || i === latIdx || i === lngIdx || addrIdxs.has(i);
+  const hit = i => i === nameIdx || i === latIdx || i === lngIdx || i === typeIdx || addrIdxs.has(i);
 
   let html = '<table class="batch-table"><thead><tr><th class="row-num">#</th>';
   for (let i = 0; i < colCount; i++) html += `<th class="${hit(i) ? 'col-hit' : ''}">${indexToColLetter(i)}</th>`;
@@ -1901,26 +2125,37 @@ function renderBatchPreview() {
   }
   html += '</tbody></table>';
   if (batchSheet.length > maxRows) html += `<div class="batch-hint" style="padding:6px 8px">Showing first ${maxRows} of ${batchSheet.length} rows.</div>`;
-  wrap.innerHTML = html;
+  g('bx-preview').innerHTML = html;
 
   const res = buildBatchRows();
-  const sum = document.getElementById('nt-batch-summary');
+  const sum = g('bx-summary');
   if (res.incomplete) {
     sum.className = 'batch-summary warn';
-    sum.textContent = 'Map the Name, Latitude and Longitude columns to import.';
+    sum.textContent = 'Map the required columns (marked *) to continue.';
   } else {
     sum.className = 'batch-summary ' + (res.rows.length ? 'ok' : 'warn');
-    sum.textContent = `${res.rows.length} location(s) ready to import` +
-      (res.skipped ? `, ${res.skipped} row(s) skipped (missing name or valid coordinates).` : '.');
+    const tail = res.skipped ? `, ${res.skipped} row(s) skipped (missing name, coordinates${hasType ? ' or type' : ''}).` : '.';
+    sum.textContent = hasType
+      ? `${res.rows.length} location(s) across ${res.types} type(s) ready` + tail
+      : `${res.rows.length} location(s) ready to import` + tail;
   }
-  updateBatchBadge(res.incomplete ? 0 : res.rows.length);
+  updateBatchUi(res);
 }
 
-function updateBatchBadge(n) {
-  const b = document.getElementById('nt-batch-badge');
-  if (b) { b.style.display = n > 0 ? 'inline-block' : 'none'; b.textContent = n; }
-  const btn = document.getElementById('nt-create-btn');
-  if (btn) btn.textContent = n > 0 ? `+ Add Type & Import ${n}` : '+ Add Type';
+// Reflect the current parse result on the importer's badge + action button.
+function updateBatchUi(res) {
+  const n = res.incomplete ? 0 : res.rows.length;
+  const badge = document.getElementById('nt-batch-badge');
+  if (badge) { badge.style.display = n > 0 ? 'inline-block' : 'none'; badge.textContent = n; }
+  const act = document.getElementById('bx-action');
+  if (act) {
+    const multi = !!document.getElementById('bx-type');
+    act.disabled = n === 0;
+    act.style.opacity = n === 0 ? 0.5 : 1;
+    act.textContent = multi
+      ? (n > 0 ? `Review & Customize ${res.types} type(s) →` : 'Review & Customize →')
+      : (n > 0 ? `+ Import ${n} Location(s)` : '+ Import Locations');
+  }
 }
 
 function toggleNewTypeKind() {
@@ -1936,18 +2171,13 @@ function updateNewTypeScalePreview() {
   if (p) p.style.background = `linear-gradient(to right, ${low}, ${high})`;
 }
 
+// Create a single type by hand (the "Single Type" tab). Batch creation of
+// many types lives in the review flow (createTypesFromReview).
 async function addLocationType() {
   const name = document.getElementById('new-type-name').value.trim();
   if (!name) { alert('Please enter a type name.'); switchNewTypeTab('details'); return; }
   const kind = document.querySelector('input[name="new-type-kind"]:checked')?.value || 'isochrone';
   const tabIds = readTabCheckboxes('nt');
-
-  // Resolve the staged batch rows up front so we can warn before creating
-  // anything that can't actually hold them.
-  const batch = batchSheet ? buildBatchRows() : { rows: [] };
-  if (kind === 'boundary' && batch.rows.length) {
-    if (!confirm("Boundary types don't hold point locations — the batch rows will be ignored. Create the boundary type anyway?")) return;
-  }
 
   let body;
   if (kind === 'boundary') {
@@ -1969,22 +2199,9 @@ async function addLocationType() {
   const newType = await fetch('/api/location-types', { method: 'POST', headers: {'Content-Type':'application/json'},
     body: JSON.stringify(body) }).then(r => r.json()).catch(() => null);
   delete window['_geojsonData_nt'];
-
-  let imported = 0;
-  if (newType && newType._id && kind !== 'boundary' && batch.rows.length) {
-    const payload = batch.rows.map(r => ({ ...r, typeId: newType._id }));
-    const resp = await fetch('/api/locations/bulk', { method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ locations: payload }) }).then(r => r.json()).catch(() => null);
-    imported = (resp && resp.inserted) || 0;
-  }
-
-  batchSheet = null;
-  batchFileName = '';
   closeModal();
-  // Select the new type so its (possibly just-imported) locations are shown.
   if (newType && newType._id) selectedTypeId = newType._id;
   await loadAll();
-  if (imported) console.log(`Imported ${imported} location(s) into "${name}".`);
 }
 
 async function deleteType(id) {
@@ -2229,6 +2446,7 @@ function showAddLocationForm(prefill = null) {
       </div>
       <div class="row">
         <button class="btn btn-success" onclick="${prefill ? `saveEditLocation('${prefill._id}')` : 'saveNewLocation()'}">${prefill ? '💾 Save Changes' : '+ Add Location'}</button>
+        ${prefill ? '' : `<button class="btn btn-primary" onclick="openSingleBatchImporter('${selectedTypeId}')" title="Import many locations from a spreadsheet or CSV">📂 Batch Add</button>`}
         <button class="btn btn-ghost" onclick="closeAddForm()">Cancel</button>
       </div>
     </div>`;
