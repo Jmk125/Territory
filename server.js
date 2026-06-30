@@ -149,6 +149,29 @@ app.post('/api/locations', (req, res) => {
   });
 });
 
+// Bulk create (used by the Configure tab's batch spreadsheet/CSV import). Each
+// item needs name + typeId + finite lat/lng; anything missing those is skipped
+// rather than failing the whole import.
+app.post('/api/locations/bulk', (req, res) => {
+  const list = Array.isArray(req.body.locations) ? req.body.locations : [];
+  const now = Date.now();
+  const docs = [];
+  for (const it of list) {
+    const lat = Number(it.lat), lng = Number(it.lng);
+    if (!it.name || !it.typeId || !Number.isFinite(lat) || !Number.isFinite(lng)) continue;
+    docs.push({
+      name: String(it.name), typeId: it.typeId, address: it.address || '', lat, lng,
+      customRadius: it.customRadius || null, customRadiusUnit: it.customRadiusUnit || null, createdAt: now
+    });
+  }
+  if (!docs.length) return res.json({ inserted: 0, skipped: list.length });
+  db.locations.insert(docs, (err, newDocs) => {
+    if (err) return res.status(500).json({ error: err.message });
+    const inserted = Array.isArray(newDocs) ? newDocs.length : 1;
+    res.json({ inserted, skipped: list.length - inserted });
+  });
+});
+
 app.put('/api/locations/:id', (req, res) => {
   const { name, address, lat, lng, customRadius, customRadiusUnit, typeId } = req.body;
   const set = { name, address, lat, lng, customRadius, customRadiusUnit };
