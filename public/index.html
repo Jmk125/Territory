@@ -473,6 +473,27 @@
     .copy-target:hover { background: var(--surface2); }
     .copy-target input { accent-color: var(--accent); }
 
+    /* ── INLINE HELP ── */
+    .help-dot { display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; border-radius: 50%; border: 1px solid var(--accent); background: none; color: var(--accent); font-size: 0.7rem; font-weight: 700; cursor: pointer; vertical-align: middle; line-height: 1; }
+    .help-dot:hover { background: var(--accent); color: #fff; }
+    .help-pop { margin-top: 8px; padding: 10px 12px; border: 1px solid var(--accent); border-radius: var(--radius); background: var(--surface2); font-size: 0.78rem; line-height: 1.5; color: var(--text2); }
+    .help-pop a { color: var(--accent); }
+
+    /* ── FILTER GROUPS ── */
+    .fg-saved-list { display: flex; flex-direction: column; gap: 4px; }
+    .fg-saved { display: flex; align-items: center; gap: 6px; padding: 5px 6px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface2); }
+    .fg-saved-name { font-weight: 700; font-size: 0.85rem; flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .fg-tree { max-height: 320px; overflow: auto; border: 1px solid var(--border); border-radius: var(--radius); padding: 4px; }
+    .fg-type-row { display: flex; align-items: center; gap: 7px; padding: 4px 6px; border-radius: var(--radius); }
+    .fg-type-row:hover { background: var(--surface2); }
+    .fg-type-row input[type=checkbox] { accent-color: var(--accent); flex-shrink: 0; }
+    .fg-type-name { font-weight: 600; font-size: 0.83rem; flex: 1; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .fg-caret { background: none; border: none; color: var(--text2); cursor: pointer; transition: transform 0.15s; padding: 0 4px; }
+    .fg-caret.open { transform: rotate(90deg); }
+    .fg-sub { margin: 2px 0 6px 26px; display: flex; flex-direction: column; gap: 2px; }
+    .fg-loc { display: flex; align-items: center; gap: 6px; font-size: 0.78rem; padding: 2px 6px; cursor: pointer; }
+    .fg-loc input { accent-color: var(--accent); }
+
     /* ── MAP TAB BAR ── */
     .map-tab-bar { display: flex; align-items: center; gap: 2px; padding: 0 12px; background: var(--surface); border-bottom: 1px solid var(--border); flex-shrink: 0; min-height: 36px; }
     .map-tab-btn { padding: 7px 14px; background: none; border: none; color: var(--text2); font-size: 0.8rem; font-weight: 600; cursor: pointer; border-bottom: 2px solid transparent; transition: all 0.15s; }
@@ -590,6 +611,7 @@
     </div>
 
     <div class="section-divider">Location Types</div>
+    <button class="btn btn-ghost btn-sm" style="width:100%; justify-content:center; margin-bottom:6px" onclick="openFilterGroups()" title="Save and load filter views">🎚 Filter Groups</button>
     <div id="type-legend" class="type-legend">
       <span class="hint">No types yet</span>
     </div>
@@ -636,6 +658,7 @@
   <div class="config-sidebar">
     <div class="config-sidebar-header">
       <span>Location Types</span>
+      <button class="gear-btn" title="Filter groups (save/load filters)" onclick="openFilterGroups()">🎚</button>
       <button class="gear-btn" title="Map data source (ORS)" onclick="openOrsSettings()">⚙</button>
     </div>
     <div class="type-list" id="type-list"></div>
@@ -708,6 +731,11 @@ let hiddenTypeIds = new Set();
 let filteredTypeIds = new Set();
 let excludedLocIds = new Set();
 let expandedTypeIds = new Set();
+
+// Saved filter groups ("mute groups"): named snapshots of which types and
+// locations are shown on the map. Persisted in localStorage.
+let filterGroups = [];
+let fgExpanded = new Set();   // which types are expanded in the filter-groups editor
 
 // Cache of computed turf polygons per location, keyed by id+coords+range
 let locPolyCache = {};
@@ -782,6 +810,7 @@ async function boot() {
   loadExcluded();
   loadHidden();
   loadFiltered();
+  loadFilterGroups();
   progressSet(0);
   await loadData();
   await prefetchCoverage();
@@ -1358,6 +1387,166 @@ function applyVisibility() {
 }
 
 // ══════════════════════════════════
+// FILTER GROUPS  (save/load filtering state, like soundboard mute groups)
+// ══════════════════════════════════
+function loadFilterGroups() {
+  try { filterGroups = JSON.parse(localStorage.getItem('filterGroups') || '[]'); }
+  catch (e) { filterGroups = []; }
+  if (!Array.isArray(filterGroups)) filterGroups = [];
+}
+function saveFilterGroups() {
+  localStorage.setItem('filterGroups', JSON.stringify(filterGroups));
+}
+
+// A type counts as "off" if it's filtered (legend) or hidden (config eye); we
+// snapshot the union so a group restores the full visible picture.
+function currentOffTypeIds() {
+  return locationTypes.filter(t => filteredTypeIds.has(t._id) || hiddenTypeIds.has(t._id)).map(t => t._id);
+}
+
+function openFilterGroups() {
+  openModal('🎚 Filter Groups', filterGroupsHtml(), { wide: true });
+}
+// Re-render just the modal body (used after every toggle so the tree + saved
+// list stay in sync with the live map state).
+function refreshFilterGroupsBody() {
+  if (document.getElementById('modal-overlay').style.display !== 'none' && document.getElementById('fg-tree')) {
+    document.getElementById('modal-body').innerHTML = filterGroupsHtml();
+  }
+}
+
+function filterGroupsHtml() {
+  const savedHtml = filterGroups.length
+    ? filterGroups.map(g => `<div class="fg-saved">
+        <button class="btn btn-success btn-sm" onclick="loadFilterGroup('${g.id}')" title="Load onto the map">▶ Load</button>
+        <span class="fg-saved-name">${escapeHtml(g.name)}</span>
+        <span class="hint" style="white-space:nowrap">${(g.offTypes || []).length} type(s), ${(g.excluded || []).length} loc(s) hidden</span>
+        <button class="btn btn-ghost btn-sm" onclick="updateFilterGroup('${g.id}')" title="Overwrite with the current map filter">💾</button>
+        <button class="btn btn-danger btn-sm" onclick="deleteFilterGroup('${g.id}')" title="Delete">✕</button>
+      </div>`).join('')
+    : '<div class="hint">No saved groups yet. Set what you want visible below, name it, and hit “Save current”.</div>';
+
+  const types = sortedTypes(locationTypes.filter(t => (t.tabIds || ['default']).includes(activeMapTabId)));
+  const treeHtml = types.length ? types.map(t => {
+    const typeOff = filteredTypeIds.has(t._id) || hiddenTypeIds.has(t._id);
+    const locs = t.layerKind === 'boundary' ? [] :
+      locations.filter(l => l.typeId === t._id)
+        .sort((a, b) => String(a.name).localeCompare(String(b.name), undefined, { numeric: true, sensitivity: 'base' }));
+    const expanded = fgExpanded.has(t._id);
+    const sub = expanded && locs.length
+      ? `<div class="fg-sub">${locs.map(l =>
+          `<label class="fg-loc"><input type="checkbox" ${excludedLocIds.has(l._id) ? '' : 'checked'} onchange="fgToggleLoc('${l._id}')"> ${escapeHtml(l.name)}</label>`).join('')}</div>`
+      : '';
+    return `<div class="fg-type">
+      <div class="fg-type-row">
+        <input type="checkbox" ${typeOff ? '' : 'checked'} onchange="fgToggleType('${t._id}')" title="Show/hide this type">
+        <span class="legend-swatch" style="background:${t.color}"></span>
+        <span class="fg-type-name" onclick="fgToggleExpand('${t._id}')">${escapeHtml(t.name)}</span>
+        <span class="hint">${locs.length || ''}</span>
+        ${locs.length ? `<button class="fg-caret ${expanded ? 'open' : ''}" onclick="fgToggleExpand('${t._id}')" title="Show locations">▸</button>` : ''}
+      </div>${sub}
+    </div>`;
+  }).join('') : '<div class="hint" style="padding:8px">No types on this map tab.</div>';
+
+  return `
+    <div class="batch-hint">Filter groups are saved snapshots of what's shown on the map — like mute groups on a mixer. Toggle types/locations below (changes apply to the map live), then save the view to recall it later. Shows the <strong>${escapeHtml((mapTabs.find(t => t._id === activeMapTabId) || {}).name || 'current')}</strong> map tab.</div>
+    <div class="section-divider">Saved groups</div>
+    <div class="fg-saved-list">${savedHtml}</div>
+    <div class="row" style="gap:8px; margin-top:8px">
+      <input type="text" id="fg-new-name" placeholder="Name this view (e.g. Plumbing only)" style="flex:1">
+      <button class="btn btn-success btn-sm" onclick="saveCurrentFilterGroup()">＋ Save current</button>
+    </div>
+    <div class="section-divider" style="margin-top:14px">What's visible <span class="hint">(applies live)</span></div>
+    <div class="row" style="gap:6px; margin-bottom:6px">
+      <button class="btn btn-ghost btn-sm" onclick="fgSetAll(true)">All on</button>
+      <button class="btn btn-ghost btn-sm" onclick="fgSetAll(false)">All off</button>
+    </div>
+    <div class="fg-tree" id="fg-tree">${treeHtml}</div>
+    <div class="row" style="margin-top:16px; gap:8px; border-top:1px solid var(--border); padding-top:14px">
+      <button class="btn btn-ghost" onclick="closeModal()">Close</button>
+    </div>`;
+}
+
+function fgToggleExpand(id) {
+  if (fgExpanded.has(id)) fgExpanded.delete(id); else fgExpanded.add(id);
+  refreshFilterGroupsBody();
+}
+
+// Toggle a whole type's visibility. "On" fully reveals it (clears both the
+// legend filter and the config eye); "off" hides it via the legend filter.
+function fgToggleType(id) {
+  const off = filteredTypeIds.has(id) || hiddenTypeIds.has(id);
+  if (off) { filteredTypeIds.delete(id); hiddenTypeIds.delete(id); }
+  else { filteredTypeIds.add(id); }
+  saveFiltered(); saveHidden();
+  applyVisibility(); renderTypeLegend(); renderTypeList();
+  refreshFilterGroupsBody();
+}
+
+function fgToggleLoc(id) {
+  if (excludedLocIds.has(id)) excludedLocIds.delete(id); else excludedLocIds.add(id);
+  saveExcluded();
+  renderTypeLegend(); renderPins(); renderCoverage();
+  refreshFilterGroupsBody();
+}
+
+function fgSetAll(on) {
+  const types = locationTypes.filter(t => (t.tabIds || ['default']).includes(activeMapTabId));
+  if (on) {
+    types.forEach(t => { filteredTypeIds.delete(t._id); hiddenTypeIds.delete(t._id); });
+    locations.forEach(l => { if (types.some(t => t._id === l.typeId)) excludedLocIds.delete(l._id); });
+  } else {
+    types.forEach(t => filteredTypeIds.add(t._id));
+  }
+  saveFiltered(); saveHidden(); saveExcluded();
+  applyVisibility(); renderTypeLegend(); renderTypeList();
+  refreshFilterGroupsBody();
+}
+
+function saveCurrentFilterGroup() {
+  const nameEl = document.getElementById('fg-new-name');
+  const name = (nameEl ? nameEl.value : '').trim();
+  if (!name) { alert('Give the filter group a name first.'); return; }
+  filterGroups.push({ id: 'fg' + Date.now(), name, offTypes: currentOffTypeIds(), excluded: [...excludedLocIds] });
+  saveFilterGroups();
+  refreshFilterGroupsBody();
+}
+
+function updateFilterGroup(id) {
+  const g = filterGroups.find(x => x.id === id);
+  if (!g) return;
+  if (!confirm(`Overwrite "${g.name}" with the current map filter?`)) return;
+  g.offTypes = currentOffTypeIds();
+  g.excluded = [...excludedLocIds];
+  saveFilterGroups();
+  refreshFilterGroupsBody();
+}
+
+function deleteFilterGroup(id) {
+  const g = filterGroups.find(x => x.id === id);
+  if (!g || !confirm(`Delete filter group "${g.name}"?`)) return;
+  filterGroups = filterGroups.filter(x => x.id !== id);
+  saveFilterGroups();
+  refreshFilterGroupsBody();
+}
+
+// Apply a saved group to the live map. Type visibility is governed by the
+// legend filter afterwards (the config eye is cleared), so the saved view is
+// reproduced exactly. Stale ids for deleted types/locations are ignored.
+function loadFilterGroup(id) {
+  const g = filterGroups.find(x => x.id === id);
+  if (!g) return;
+  const liveTypes = new Set(locationTypes.map(t => t._id));
+  const liveLocs = new Set(locations.map(l => l._id));
+  filteredTypeIds = new Set((g.offTypes || []).filter(x => liveTypes.has(x)));
+  hiddenTypeIds = new Set();
+  excludedLocIds = new Set((g.excluded || []).filter(x => liveLocs.has(x)));
+  saveFiltered(); saveHidden(); saveExcluded();
+  applyVisibility(); renderTypeLegend(); renderTypeList();
+  refreshFilterGroupsBody();
+}
+
+// ══════════════════════════════════
 // TABS
 // ══════════════════════════════════
 function switchTab(tab) {
@@ -1780,7 +1969,14 @@ function batchConfigHtml(mode) {
     ? 'Upload a geocoded spreadsheet or CSV that may contain several location types. Map the columns below — each distinct value in the <strong>Location Type</strong> column becomes a new type you can style on the next screen.'
     : 'Upload a geocoded spreadsheet or CSV. Matching rows are added to this type and plotted immediately.';
   return `
-    <div class="batch-hint">${intro}</div>
+    <div class="batch-hint">${intro} <button type="button" class="help-dot" onclick="toggleHelp('bx-help')" title="No coordinates yet? Here's how to get them">?</button></div>
+    <div id="bx-help" class="help-pop" style="display:none">
+      <strong>Don't have latitude/longitude yet?</strong><br>
+      You can batch-geocode your addresses for free at the U.S. Census Bureau geocoder —
+      <a href="https://geocoding.geo.census.gov/geocoder/locations/addressbatch" target="_blank" rel="noopener">geocoding.geo.census.gov</a>.
+      Upload a CSV of up to 10,000 addresses (columns: unique&nbsp;ID, street, city, state, ZIP) and it returns each one with its
+      longitude &amp; latitude. Paste those two columns back into your sheet, then map them above for next time.
+    </div>
     <div class="geojson-upload">
       <label class="upload-btn">📂 Upload spreadsheet / CSV
         <input type="file" id="bx-file" accept=".csv,.xlsx,.xls" onchange="handleBatchFile(this)">
@@ -2454,6 +2650,12 @@ function renderLocCard(l, type) {
   </div>`;
 }
 
+// Toggle a small inline help/popover block by id (used by the batch help "?").
+function toggleHelp(id) {
+  const el = document.getElementById(id);
+  if (el) el.style.display = el.style.display === 'none' ? 'block' : 'none';
+}
+
 function flyTo(lat, lng) {
   switchTab('map');
   setTimeout(() => { map.flyTo([lat, lng], 11, { duration: 1.2 }); }, 100);
@@ -2847,36 +3049,72 @@ function setPinBubbleMinutes(id, val) {
   if (p.bubble) renderProjectBubbles();
 }
 
-// Click a project pin → modal listing covering territories, sorted by drive time
-async function showPinTerritories(pin) {
+// The pin whose distance window is currently open — so the in-modal toggle
+// buttons can re-invoke showPinTerritories in the other mode.
+let pinInfoPin = null;
+
+// Confirm before computing distance to every location (it can be slow / a big
+// ORS matrix call), then switch the open pin window into "all locations" mode.
+function confirmAllDistances() {
+  if (!pinInfoPin) return;
+  const n = locations.filter(l => {
+    const t = locationTypes.find(x => x._id === l.typeId);
+    return t && t.layerKind !== 'boundary';
+  }).length;
+  if (n > 50 && !confirm(`This will calculate the driving distance from all ${n} locations to this pin (ignoring coverage boundaries). That can take a little while. Continue?`)) return;
+  showPinTerritories(pinInfoPin, { all: true });
+}
+
+// Click a project pin → modal listing covering territories, sorted by drive
+// time. With { all:true } it ignores coverage boundaries and lists EVERY
+// location by distance instead of only the ones whose territory contains the pin.
+async function showPinTerritories(pin, opts = {}) {
+  pinInfoPin = pin;
+  const all = !!opts.all;
   const subtitle = pin.address ? `<div class="hint" style="margin-bottom:10px">${escapeHtml(pin.address)}</div>` : '';
-  openModal(`📌 ${escapeHtml(pin.name)}`, `${subtitle}<div class="hint">Finding covering territories…</div>`);
+  openModal(`📌 ${escapeHtml(pin.name)}`, `${subtitle}<div class="hint">${all ? 'Measuring distance to every location…' : 'Finding covering territories…'}</div>`, { wide: true });
 
-  // Which territories' coverage areas contain this point?
-  const results = await Promise.all(locations.map(async l => {
-    if (excludedLocIds.has(l._id)) return null;         // excluded = unavailable
+  const candidates = locations.filter(l => {
     const type = locationTypes.find(t => t._id === l.typeId);
-    if (!type) return null;
-    const poly = await getLocationPolygon(l);
-    if (!poly) return null;
-    try {
-      if (turf.booleanPointInPolygon([pin.lng, pin.lat], poly)) return { loc: l, type };
-    } catch (e) { /* skip bad geometry */ }
-    return null;
-  }));
-  const matches = results.filter(Boolean);
+    return type && type.layerKind !== 'boundary';
+  });
 
-  const actions = `<div class="row" style="margin-top:18px;gap:8px">
+  let matches;
+  if (all) {
+    // Ignore boundaries: every location is a candidate, distance-only.
+    matches = candidates.map(l => ({ loc: l, type: locationTypes.find(t => t._id === l.typeId) }));
+  } else {
+    // Which territories' coverage areas contain this point?
+    const results = await Promise.all(candidates.map(async l => {
+      if (excludedLocIds.has(l._id)) return null;         // excluded = unavailable
+      const type = locationTypes.find(t => t._id === l.typeId);
+      const poly = await getLocationPolygon(l);
+      if (!poly) return null;
+      try {
+        if (turf.booleanPointInPolygon([pin.lng, pin.lat], poly)) return { loc: l, type };
+      } catch (e) { /* skip bad geometry */ }
+      return null;
+    }));
+    matches = results.filter(Boolean);
+  }
+
+  // Mode toggle + standard actions, shared by every render below.
+  const toggleBtn = all
+    ? `<button class="btn btn-ghost btn-sm" onclick="showPinTerritories(pinInfoPin)">↩ Only covering territories</button>`
+    : `<button class="btn btn-ghost btn-sm" onclick="confirmAllDistances()" title="Ignore coverage boundaries and rank every location by drive time">📏 Distance to every location</button>`;
+  const actions = `<div class="row" style="margin-top:18px;gap:8px;flex-wrap:wrap">
+      ${toggleBtn}
       <button class="btn btn-success btn-sm" onclick="openMakePermanent('${pin.id}')">⭐ Make Permanent</button>
       <button class="btn btn-ghost btn-sm" onclick="closeModal()">Close</button>
     </div>`;
 
   if (!matches.length) {
-    openModal(`📌 ${escapeHtml(pin.name)}`, `${subtitle}<div style="color:var(--text2);font-size:0.88rem">This pin is not inside any territory's coverage area.</div>${actions}`);
+    const msg = all ? 'There are no locations to measure yet.' : "This pin is not inside any territory's coverage area.";
+    openModal(`📌 ${escapeHtml(pin.name)}`, `${subtitle}<div style="color:var(--text2);font-size:0.88rem">${msg}</div>${actions}`, { wide: true });
     return;
   }
 
-  // Driving time from each covering territory → the pin, then sort nearest-first
+  // Driving time from each location → the pin, then sort nearest-first
   const tt = await fetch('/api/travel-times', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ from: matches.map(m => ({ lat: m.loc.lat, lng: m.loc.lng })), to: { lat: pin.lat, lng: pin.lng } })
@@ -2907,9 +3145,12 @@ async function showPinTerritories(pin) {
         </div>`).join('')}
     </div>`).join('');
 
+  const header = all
+    ? `Distance to all ${rows.length} location${rows.length > 1 ? 's' : ''} · boundaries ignored, grouped by type, nearest first`
+    : `Covered by ${rows.length} territor${rows.length > 1 ? 'ies' : 'y'} · grouped by type, nearest first`;
   const note = anyEstimated ? `<div class="hint" style="margin-top:8px">~ straight-line estimate (add an ORS key for real drive times)</div>` : '';
   openModal(`📌 ${escapeHtml(pin.name)}`,
-    `${subtitle}<div class="hint" style="margin-bottom:2px">Covered by ${rows.length} territor${rows.length > 1 ? 'ies' : 'y'} · grouped by type, nearest first</div>${list}${note}${actions}`);
+    `${subtitle}<div class="hint" style="margin-bottom:2px">${header}</div>${list}${note}${actions}`, { wide: true });
 }
 
 function openModal(title, html, opts = {}) {
