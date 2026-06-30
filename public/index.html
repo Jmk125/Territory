@@ -218,6 +218,8 @@
     .type-legend { display: flex; flex-direction: column; gap: 6px; }
     .legend-item { display: flex; align-items: center; gap: 8px; font-size: 0.8rem; }
     .legend-swatch { width: 14px; height: 14px; border-radius: 50%; flex-shrink: 0; }
+    .legend-swatch.clickable { cursor: pointer; transition: transform 0.1s, box-shadow 0.1s; }
+    .legend-swatch.clickable:hover { transform: scale(1.2); box-shadow: 0 0 0 2px var(--surface), 0 0 0 3px currentColor; }
     .legend-combined { display: flex; align-items: center; gap: 8px; font-size: 0.8rem; cursor: pointer; }
     .legend-combined input[type=checkbox] { accent-color: var(--accent); }
     .legend-type { display: flex; flex-direction: column; }
@@ -425,7 +427,7 @@
     .ors-opt input { margin-top: 3px; }
     .ors-opt-title { font-weight: 700; font-size: 0.88rem; margin-bottom: 2px; }
     .ors-opt code, .modal-body code { background: var(--surface2); padding: 1px 4px; border-radius: 4px; font-size: 0.85em; }
-    .modal.modal-wide { width: 680px; }
+    .modal.modal-wide { width: 940px; }
 
     /* ── IN-MODAL TABS ── */
     .modal-tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin: -4px -2px 14px; }
@@ -464,6 +466,12 @@
     .rv-loc-name { font-weight: 600; white-space: nowrap; }
     .rv-loc-addr { color: var(--text2); text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .rv-custom { margin-top: 10px; border-top: 1px dashed var(--border); padding-top: 10px; }
+
+    /* ── COPY LOCATION ── */
+    .copy-target-list { display: flex; flex-direction: column; gap: 4px; margin-top: 10px; max-height: 320px; overflow: auto; }
+    .copy-target { display: flex; align-items: center; gap: 8px; font-size: 0.85rem; padding: 6px 8px; border-radius: var(--radius); cursor: pointer; }
+    .copy-target:hover { background: var(--surface2); }
+    .copy-target input { accent-color: var(--accent); }
 
     /* ── MAP TAB BAR ── */
     .map-tab-bar { display: flex; align-items: center; gap: 2px; padding: 0 12px; background: var(--surface); border-bottom: 1px solid var(--border); flex-shrink: 0; min-height: 36px; }
@@ -1365,9 +1373,23 @@ function switchTab(tab) {
 // ══════════════════════════════════
 // LOCATION TYPES
 // ══════════════════════════════════
+// Natural sort by name so "2 - X" < "10 - X" and "22 - Plumbing" < "23 - Mechanical".
+// Used everywhere types are listed so the order is consistent across the app.
+function sortedTypes(arr) {
+  return arr.slice().sort((a, b) =>
+    String(a.name).localeCompare(String(b.name), undefined, { numeric: true, sensitivity: 'base' }));
+}
+
+// Find a non-boundary type by name (trimmed, case-insensitive). Used by the
+// batch review to merge into an existing type instead of creating a duplicate.
+function findTypeByName(name) {
+  const key = String(name).trim().toLowerCase();
+  return locationTypes.find(t => t.layerKind !== 'boundary' && String(t.name).trim().toLowerCase() === key) || null;
+}
+
 function renderTypeList() {
   const list = document.getElementById('type-list');
-  const filteredTypes = locationTypes.filter(t => (t.tabIds || ['default']).includes(activeConfigTabId));
+  const filteredTypes = sortedTypes(locationTypes.filter(t => (t.tabIds || ['default']).includes(activeConfigTabId)));
   if (!filteredTypes.length) {
     list.innerHTML = '<div class="empty-state" style="padding:24px 12px"><div class="icon">🏷</div><p>No types on this tab yet.<br>Add one below.</p></div>';
     return;
@@ -1404,7 +1426,7 @@ function renderTypeLegend() {
   if (!locationTypes.length) { el.innerHTML = '<span class="hint">No types yet</span>'; return; }
   // Hidden types are controlled from the Configure tab's eye toggle and are
   // omitted from the map view entirely — not just dimmed.
-  const visibleTypes = locationTypes.filter(t => !hiddenTypeIds.has(t._id) && (t.tabIds || ['default']).includes(activeMapTabId));
+  const visibleTypes = sortedTypes(locationTypes.filter(t => !hiddenTypeIds.has(t._id) && (t.tabIds || ['default']).includes(activeMapTabId)));
   if (!visibleTypes.length) {
     el.innerHTML = '<span class="hint">No types on this tab — assign types in the Configure tab.</span>';
     return;
@@ -1416,7 +1438,7 @@ function renderTypeLegend() {
       const hasScale = t.colorByField && t.colorScaleLow && t.colorScaleHigh;
       return `<div class="legend-type">
         <div class="legend-item">
-          <div class="legend-swatch" style="background:${t.color}"></div>
+          <div class="legend-swatch clickable" style="background:${t.color}" onclick="editLocationType('${t._id}')" title="Edit ${escapeHtml(t.name)} appearance"></div>
           <span class="legend-name">${escapeHtml(t.name)}</span>
           <span class="hint" style="font-size:0.6rem">BDY</span>
           <label class="toggle-switch" title="Show/hide ${escapeHtml(t.name)} on the map">
@@ -1454,7 +1476,7 @@ function renderTypeLegend() {
     return `
     <div class="legend-type">
       <div class="legend-item">
-        <div class="legend-swatch" style="background:${t.color}"></div>
+        <div class="legend-swatch clickable" style="background:${t.color}" onclick="editLocationType('${t._id}')" title="Edit ${escapeHtml(t.name)} appearance"></div>
         <span class="legend-name">${t.name}</span>
         <button class="legend-filter-btn ${expanded ? 'open' : ''} ${excludedCount ? 'has-excluded' : ''}"
                 onclick="toggleTypeExpand('${t._id}')" title="Filter individual ${t.name} locations">
@@ -1820,7 +1842,14 @@ function openBatchReview() {
   }
   const names = [...groups.keys()];
   const colors = randomColors(names.length);
-  batchReviewGroups = names.map((nm, i) => ({ typeName: nm, color: colors[i], locations: groups.get(nm) }));
+  // A type value that matches an existing (non-boundary) type by name merges
+  // into it instead of creating a duplicate — important for multi-type cells
+  // like "22 - Plumbing, 23 - Mechanical" where those divisions already exist.
+  batchReviewGroups = names.map((nm, i) => {
+    const existing = findTypeByName(nm);
+    return { typeName: nm, existingId: existing ? existing._id : null,
+      color: existing ? existing.color : colors[i], locations: groups.get(nm) };
+  });
   openModal('🎨 Review Import', batchReviewHtml(), { wide: true });
   const tabHost = document.getElementById('rv-tab-checkboxes');
   if (tabHost) tabHost.innerHTML = tabCheckboxesHtml('rv', [activeConfigTabId || 'default']);
@@ -1828,17 +1857,34 @@ function openBatchReview() {
 
 function batchReviewHtml() {
   const totalLocs = batchReviewGroups.reduce((s, g) => s + g.locations.length, 0);
+  const newCount = batchReviewGroups.filter(g => !g.existingId).length;
+  const existingCount = batchReviewGroups.length - newCount;
   const cards = batchReviewGroups.map((g, i) => {
     const locsList = g.locations.map(l =>
       `<div class="rv-loc"><span class="rv-loc-name">${escapeHtml(l.name)}</span><span class="rv-loc-addr">${escapeHtml(l.address || (l.lat.toFixed(4) + ', ' + l.lng.toFixed(4)))}</span></div>`).join('');
+    const locsBlock = `<details class="rv-locs"><summary>Show ${g.locations.length} location(s)</summary><div class="rv-locs-list">${locsList}</div></details>`;
+    // Existing type → no appearance controls (we don't touch a type that's
+    // already styled); we just add its locations.
+    if (g.existingId) {
+      return `<div class="rv-card">
+        <div class="rv-card-head">
+          <span class="type-dot" style="width:14px;height:14px;border-radius:50%;background:${g.color};display:inline-block;flex-shrink:0"></span>
+          <span class="rv-name-input" style="border:none;background:none;padding:0">${escapeHtml(g.typeName)}</span>
+          <span class="rv-count">${g.locations.length} loc${g.locations.length !== 1 ? 's' : ''}</span>
+          <span class="hint" style="color:var(--accent2);white-space:nowrap">↳ existing — adds to it</span>
+        </div>
+        ${locsBlock}
+      </div>`;
+    }
     return `<div class="rv-card">
       <div class="rv-card-head">
         <input type="color" id="rv${i}-color" value="${g.color}" oninput="updateStylePreview('rv${i}')" title="Type color">
         <input type="text" id="rv${i}-name" class="rv-name-input" value="${escapeHtml(g.typeName)}">
         <span class="rv-count">${g.locations.length} loc${g.locations.length !== 1 ? 's' : ''}</span>
+        <span class="hint" style="color:var(--success);white-space:nowrap">new</span>
         <button class="btn btn-ghost btn-sm" id="rv${i}-toggle" onclick="toggleReviewDetails(${i})">Customize ▸</button>
       </div>
-      <details class="rv-locs"><summary>Show ${g.locations.length} location(s)</summary><div class="rv-locs-list">${locsList}</div></details>
+      ${locsBlock}
       <div class="rv-custom" id="rv${i}-custom" style="display:none">
         <div class="row" style="gap:8px; align-items:flex-end; margin-top:6px">
           <div style="flex:1">
@@ -1854,13 +1900,15 @@ function batchReviewHtml() {
       </div>
     </div>`;
   }).join('');
+  const mergeNote = existingCount
+    ? ` <strong>${existingCount}</strong> already exist and will receive their locations;` : '';
   return `
-    <div class="batch-hint">Found <strong>${batchReviewGroups.length}</strong> location type(s) and <strong>${totalLocs}</strong> location(s). Each type got a random color and default settings — adjust any of them, then create.</div>
+    <div class="batch-hint">Found <strong>${batchReviewGroups.length}</strong> location type(s) and <strong>${totalLocs}</strong> location(s).${mergeNote} New types got a random color and default settings — adjust any of them, then create.</div>
     <div class="rv-cards">${cards}</div>
-    <div class="section-divider" style="margin-top:14px">Show on map tabs</div>
+    <div class="section-divider" style="margin-top:14px">Show on map tabs <span class="hint">(applies to new types)</span></div>
     <div id="rv-tab-checkboxes"></div>
     <div class="row" style="margin-top:18px; gap:8px; border-top:1px solid var(--border); padding-top:14px">
-      <button class="btn btn-success" onclick="createTypesFromReview()">✓ Create ${batchReviewGroups.length} type(s) &amp; ${totalLocs} location(s)</button>
+      <button class="btn btn-success" onclick="createTypesFromReview()">✓ Import ${totalLocs} location(s) into ${batchReviewGroups.length} type(s)</button>
       <button class="btn btn-ghost" onclick="openNewTypeModal({keepBatch:true})">‹ Back</button>
     </div>`;
 }
@@ -1876,27 +1924,37 @@ function toggleReviewDetails(i) {
 
 async function createTypesFromReview() {
   const tabIds = readTabCheckboxes('rv');
-  let createdTypeId = null, totalLocs = 0;
+  let lastTypeId = null, totalLocs = 0;
   for (let i = 0; i < batchReviewGroups.length; i++) {
     const g = batchReviewGroups[i];
-    const name = (document.getElementById('rv' + i + '-name').value.trim()) || g.typeName;
-    const color = document.getElementById('rv' + i + '-color').value;
-    const radius = parseInt(document.getElementById('rv' + i + '-radius').value) || 60;
-    const unit = document.getElementById('rv' + i + '-unit').value;
-    const style = readStyleInputs('rv' + i);
-    const newType = await fetch('/api/location-types', { method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ name, color, layerKind: 'isochrone', tabIds, defaultRadius: radius, defaultRadiusUnit: unit, ...stylePayload(style) }) })
-      .then(r => r.json()).catch(() => null);
-    if (!newType || !newType._id) continue;
-    createdTypeId = newType._id;
-    const payload = g.locations.map(l => ({ name: l.name, address: l.address, lat: l.lat, lng: l.lng, typeId: newType._id }));
+    // Resolve the target type id: an existing match (re-checked by final name so
+    // a renamed "new" card that now collides also merges), else create new.
+    const nameEl = document.getElementById('rv' + i + '-name');
+    const name = (nameEl ? nameEl.value.trim() : '') || g.typeName;
+    let typeId;
+    const existing = findTypeByName(name);
+    if (existing) {
+      typeId = existing._id;
+    } else {
+      const color = document.getElementById('rv' + i + '-color').value;
+      const radius = parseInt(document.getElementById('rv' + i + '-radius').value) || 60;
+      const unit = document.getElementById('rv' + i + '-unit').value;
+      const style = readStyleInputs('rv' + i);
+      const newType = await fetch('/api/location-types', { method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ name, color, layerKind: 'isochrone', tabIds, defaultRadius: radius, defaultRadiusUnit: unit, ...stylePayload(style) }) })
+        .then(r => r.json()).catch(() => null);
+      if (!newType || !newType._id) continue;
+      typeId = newType._id;
+    }
+    lastTypeId = typeId;
+    const payload = g.locations.map(l => ({ name: l.name, address: l.address, lat: l.lat, lng: l.lng, typeId }));
     const resp = await fetch('/api/locations/bulk', { method: 'POST', headers: {'Content-Type':'application/json'},
       body: JSON.stringify({ locations: payload }) }).then(r => r.json()).catch(() => null);
     totalLocs += (resp && resp.inserted) || 0;
   }
   batchReviewGroups = []; batchSheet = null; batchFileName = ''; batchMapping = null;
   closeModal();
-  if (createdTypeId) selectedTypeId = createdTypeId;
+  if (lastTypeId) selectedTypeId = lastTypeId;
   await loadAll();
   console.log(`Imported ${totalLocs} location(s).`);
 }
@@ -2089,11 +2147,18 @@ function buildBatchRows() {
     const address = addrIdxs.map(i => String(arr[i] ?? '').trim()).filter(Boolean).join(' ');
     const lat = parseFloat(arr[latIdx]);
     const lng = parseFloat(arr[lngIdx]);
-    const typeName = hasType ? String(arr[typeIdx] ?? '').trim() : null;
+    // One cell may list several types ("22 - Plumbing, 23 - Mechanical"): the
+    // location is added to each, so split on commas/semicolons and emit a row
+    // per type. (De-duped so "22, 22" doesn't double-add.)
+    const typeNames = hasType
+      ? [...new Set(String(arr[typeIdx] ?? '').split(/[,;]/).map(t => t.trim()).filter(Boolean))]
+      : [null];
     const badCoord = !isFinite(lat) || !isFinite(lng) || lat < -90 || lat > 90 || lng < -180 || lng > 180;
-    if (!name || badCoord || (hasType && !typeName)) { skipped++; continue; }
-    rows.push({ typeName, name, address, lat, lng });
-    if (hasType) typeSet.add(typeName);
+    if (!name || badCoord || (hasType && !typeNames.length)) { skipped++; continue; }
+    for (const typeName of typeNames) {
+      rows.push({ typeName, name, address, lat, lng });
+      if (hasType) typeSet.add(typeName);
+    }
   }
   return { rows, skipped, total, types: typeSet.size };
 }
@@ -2382,6 +2447,7 @@ function renderLocCard(l, type) {
     </div>
     <div class="loc-actions">
       <button class="btn btn-ghost btn-sm" onclick="flyTo(${l.lat}, ${l.lng})" title="View on map">🗺</button>
+      <button class="btn btn-ghost btn-sm" onclick="copyLocationPrompt('${l._id}')" title="Copy to another type">⧉</button>
       <button class="btn btn-ghost btn-sm" onclick="editLocation('${l._id}')" title="Edit">✏</button>
       <button class="btn btn-danger btn-sm" onclick="deleteLocation('${l._id}')" title="Delete">✕</button>
     </div>
@@ -2411,7 +2477,7 @@ function showAddLocationForm(prefill = null) {
       <div>
         <label class="field-label">Location Type <span class="hint">(move to another type)</span></label>
         <select id="edit-loc-type">
-          ${locationTypes.map(t => `<option value="${t._id}" ${t._id === prefill.typeId ? 'selected' : ''}>${escapeHtml(t.name)}</option>`).join('')}
+          ${sortedTypes(locationTypes).map(t => `<option value="${t._id}" ${t._id === prefill.typeId ? 'selected' : ''}>${escapeHtml(t.name)}</option>`).join('')}
         </select>
       </div>` : ''}
       <div>
@@ -2504,6 +2570,38 @@ async function deleteLocation(id) {
   const loc = locations.find(l => l._id === id);
   if (!confirm(`Delete "${loc.name}"?`)) return;
   await fetch(`/api/locations/${id}`, { method: 'DELETE' });
+  await loadAll();
+}
+
+// Copy a location into one or more other types. Each copy is an independent
+// record (same name/address/coords/override) so a contractor who works under
+// e.g. "22 - Plumbing" and "23 - Mechanical" shows up in both.
+function copyLocationPrompt(id) {
+  const l = locations.find(x => x._id === id);
+  if (!l) return;
+  const targets = sortedTypes(locationTypes.filter(t => t.layerKind !== 'boundary' && t._id !== l.typeId));
+  if (!targets.length) { alert('No other location types to copy into. Create another type first.'); return; }
+  openModal('⧉ Copy "' + escapeHtml(l.name) + '" to…', `
+    <div class="batch-hint">Creates an independent copy of this location in each selected type (same address & coordinates). You can edit each copy afterward.</div>
+    <div class="copy-target-list">
+      ${targets.map(t => `<label class="copy-target"><input type="checkbox" name="copy-target" value="${t._id}"><span style="width:11px;height:11px;border-radius:50%;background:${t.color};display:inline-block;flex-shrink:0"></span> ${escapeHtml(t.name)}</label>`).join('')}
+    </div>
+    <div class="row" style="margin-top:16px; gap:8px">
+      <button class="btn btn-success" onclick="copyLocationToTypes('${id}')">⧉ Copy</button>
+      <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
+    </div>`);
+}
+
+async function copyLocationToTypes(id) {
+  const l = locations.find(x => x._id === id);
+  if (!l) return;
+  const ids = Array.from(document.querySelectorAll('input[name="copy-target"]:checked')).map(e => e.value);
+  if (!ids.length) { closeModal(); return; }
+  const payload = ids.map(typeId => ({ name: l.name, address: l.address || '', lat: l.lat, lng: l.lng,
+    customRadius: l.customRadius || null, customRadiusUnit: l.customRadiusUnit || null, typeId }));
+  await fetch('/api/locations/bulk', { method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ locations: payload }) }).catch(() => null);
+  closeModal();
   await loadAll();
 }
 
