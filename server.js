@@ -572,6 +572,48 @@ app.post('/api/travel-times', async (req, res) => {
   res.json({ times: results });
 });
 
+// ─── Directions (turn-by-turn, with up to 3 alternative routes) ────────
+// Proxies the ORS Directions API from one location → the pin, requesting a few
+// alternative routes. Returns each route's geometry + step list (miles). Needs
+// a usable ORS source — without one there's no routing engine, so we say so.
+app.post('/api/directions', async (req, res) => {
+  const { from, to } = req.body || {};
+  if (!from || !to || from.lat == null || to.lat == null) {
+    return res.status(400).json({ error: 'from and to required' });
+  }
+  const target = resolveOrsTarget(await getOrsSettings());
+  if (!target.usable) {
+    return res.json({ usable: false, routes: [], message: 'Turn-by-turn directions need an OpenRouteService source. Set one in ⚙ Map Data Source.' });
+  }
+  try {
+    const r = await fetchWithTimeout(`${target.baseUrl}/v2/directions/driving-car/geojson`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': target.authHeader },
+      body: JSON.stringify({
+        coordinates: [[from.lng, from.lat], [to.lng, to.lat]],
+        alternative_routes: { target_count: 3, weight_factor: 1.6, share_factor: 0.6 },
+        instructions: true,
+        units: 'mi'
+      })
+    });
+    const data = await r.json();
+    if (data.error || !Array.isArray(data.features)) {
+      const reason = data.error ? (data.error.message || JSON.stringify(data.error)) : `HTTP ${r.status}`;
+      return res.json({ usable: true, routes: [], message: `Could not compute a route (${reason}).` });
+    }
+    const routes = data.features.map(f => {
+      const props = f.properties || {};
+      const steps = (props.segments || []).flatMap(seg => seg.steps || []).map(st => ({
+        instruction: st.instruction, distance: st.distance, name: st.name && st.name !== '-' ? st.name : ''
+      }));
+      return { summary: props.summary || {}, geometry: f.geometry, steps };
+    });
+    res.json({ usable: true, routes });
+  } catch (e) {
+    res.json({ usable: true, routes: [], message: `Routing request failed (${e.name === 'AbortError' ? 'timed out' : e.message}).` });
+  }
+});
+
 // average driving speed ~50mph = ~1340 meters/minute
 function minutesToMeters(minutes) {
   return Math.round(minutes * 1340);

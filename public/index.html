@@ -497,6 +497,34 @@
     .fg-loc { display: flex; align-items: center; gap: 6px; font-size: 0.78rem; padding: 2px 6px; cursor: pointer; }
     .fg-loc input { accent-color: var(--accent); }
 
+    /* ── DRIVING DIRECTIONS ── */
+    .route-tabs { display: flex; gap: 6px; margin-bottom: 12px; flex-wrap: wrap; }
+    .route-tab { display: flex; flex-direction: column; align-items: flex-start; gap: 1px; padding: 6px 12px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface2); color: var(--text2); cursor: pointer; font-weight: 700; font-size: 0.82rem; }
+    .route-tab.active { border-color: var(--accent); color: var(--accent); background: var(--surface); }
+    .route-tab-sub { font-weight: 600; font-size: 0.7rem; color: var(--text2); }
+    .route-print-title { font-weight: 700; font-size: 0.9rem; margin-bottom: 8px; }
+    #route-map { height: 300px; width: 100%; border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+    .route-steps { list-style: none; margin: 12px 0 0; padding: 0; counter-reset: none; }
+    .route-steps li { display: flex; align-items: flex-start; gap: 10px; padding: 7px 4px; border-bottom: 1px solid var(--border); font-size: 0.83rem; }
+    .route-steps .step-n { flex-shrink: 0; width: 22px; height: 22px; border-radius: 50%; background: var(--accent); color: #fff; font-size: 0.72rem; font-weight: 700; display: flex; align-items: center; justify-content: center; }
+    .route-steps .step-txt { flex: 1; min-width: 0; }
+    .route-steps .step-road { color: var(--text2); }
+    .route-steps .step-dist { flex-shrink: 0; color: var(--text2); font-weight: 600; white-space: nowrap; }
+
+    /* Print only the selected route (map + steps). */
+    @media print {
+      @page { margin: 12mm; }
+      body.printing-route > *:not(.modal-overlay) { display: none !important; }
+      body.printing-route .modal-overlay { position: static; display: block; background: none; }
+      body.printing-route .modal { position: static; width: auto; max-width: none; max-height: none; overflow: visible; border: none; box-shadow: none; background: none; }
+      body.printing-route .modal-header,
+      body.printing-route .no-print,
+      body.printing-route .leaflet-control-container { display: none !important; }
+      body.printing-route .route-print-title { font-size: 12pt; }
+      body.printing-route #route-map { height: 3.2in; border: 1px solid #999; }
+      body.printing-route .route-steps li { break-inside: avoid; }
+    }
+
     /* ── MAP TAB BAR ── */
     .map-tab-bar { display: flex; align-items: center; gap: 2px; padding: 0 12px; background: var(--surface); border-bottom: 1px solid var(--border); flex-shrink: 0; min-height: 36px; }
     .map-tab-btn { padding: 7px 14px; background: none; border: none; color: var(--text2); font-size: 0.8rem; font-weight: 600; cursor: pointer; border-bottom: 2px solid transparent; transition: all 0.15s; }
@@ -3203,6 +3231,7 @@ async function showPinTerritories(pin, opts = {}) {
       </div>
       ${g.items.map(r => `
         <div style="display:flex;align-items:center;gap:10px;padding:5px 0 5px 19px;border-bottom:1px solid var(--border)">
+          <button class="btn btn-ghost btn-sm" style="flex-shrink:0;padding:2px 6px" onclick="showRoutes('${r.loc._id}')" title="Directions from ${escapeHtml(r.loc.name)} to this pin">🗺</button>
           <div style="flex:1;min-width:0;font-size:0.85rem;font-weight:600">${escapeHtml(r.loc.name)}</div>
           <div style="font-weight:700;color:var(--accent);white-space:nowrap">${r.estimated ? '~' : ''}${fmtDuration(r.seconds)}</div>
         </div>`).join('')}
@@ -3216,7 +3245,114 @@ async function showPinTerritories(pin, opts = {}) {
     `${subtitle}<div class="hint" style="margin-bottom:2px">${header}</div>${list}${note}${actions}`, { wide: true });
 }
 
+// ══════════════════════════════════
+// DRIVING DIRECTIONS  (top-3 routes with turn-by-turn, printable)
+// ══════════════════════════════════
+let routeState = null;   // { loc, pin, routes:[{summary,geometry,steps}], selected }
+let routeMap = null;     // the Leaflet map instance inside the routes modal
+
+async function showRoutes(locId) {
+  const loc = locations.find(l => l._id === locId);
+  const pin = pinInfoPin;
+  if (!loc || !pin) return;
+  openModal('🧭 Directions', `<div class="hint">Finding the best routes…</div>`, { wide: true });
+  const data = await fetch('/api/directions', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ from: { lat: loc.lat, lng: loc.lng }, to: { lat: pin.lat, lng: pin.lng } })
+  }).then(r => r.json()).catch(() => null);
+
+  if (!data || !data.routes || !data.routes.length) {
+    const msg = (data && data.message) || 'No route could be found between these points.';
+    openModal('🧭 Directions', `<div style="color:var(--text2);font-size:0.88rem">${escapeHtml(msg)}</div>
+      <div class="row" style="margin-top:16px;gap:8px">
+        <button class="btn btn-ghost btn-sm" onclick="showPinTerritories(pinInfoPin)">‹ Back</button>
+        <button class="btn btn-ghost btn-sm" onclick="closeModal()">Close</button>
+      </div>`, { wide: true });
+    return;
+  }
+  routeState = { loc, pin, routes: data.routes, selected: 0 };
+  renderRoutesModal();
+}
+
+function renderRoutesModal() {
+  const { loc, pin, routes, selected } = routeState;
+  const tabs = routes.map((rt, i) => {
+    const s = rt.summary || {};
+    return `<button class="route-tab ${i === selected ? 'active' : ''}" onclick="selectRoute(${i})">
+      <span>Route ${i + 1}</span><span class="route-tab-sub">${fmtMiles(s.distance)} · ${fmtDuration(s.duration)}</span>
+    </button>`;
+  }).join('');
+  const rt = routes[selected];
+  const s = rt.summary || {};
+  const steps = rt.steps.length
+    ? rt.steps.map((st, i) => `<li>
+        <span class="step-n">${i + 1}</span>
+        <span class="step-txt">${escapeHtml(st.instruction || '')}${st.name ? ` <span class="step-road">on ${escapeHtml(st.name)}</span>` : ''}</span>
+        <span class="step-dist">${st.distance > 0 ? fmtMiles(st.distance) : ''}</span>
+      </li>`).join('')
+    : '<li>No step-by-step directions were returned for this route.</li>';
+
+  openModal('🧭 Directions', `
+    <div class="route-tabs no-print">${tabs}</div>
+    <div id="route-print-area">
+      <div class="route-print-title">${escapeHtml(loc.name)} → ${escapeHtml(pin.name)} · Route ${selected + 1} · ${fmtMiles(s.distance)} · ${fmtDuration(s.duration)}</div>
+      <div id="route-map"></div>
+      <ol class="route-steps" id="route-steps">${steps}</ol>
+    </div>
+    <div class="row no-print" style="margin-top:14px;gap:8px;flex-wrap:wrap">
+      <button class="btn btn-ghost btn-sm" onclick="showPinTerritories(pinInfoPin)">‹ Back</button>
+      <button class="btn btn-primary btn-sm" onclick="printRoute()">🖨 Print this route</button>
+      <button class="btn btn-ghost btn-sm" onclick="closeModal()">Close</button>
+    </div>`, { wide: true });
+  drawRouteMap();
+}
+
+function selectRoute(i) {
+  if (!routeState) return;
+  routeState.selected = i;
+  renderRoutesModal();
+}
+
+function drawRouteMap() {
+  destroyRouteMap();
+  const el = document.getElementById('route-map');
+  if (!el || !routeState) return;
+  routeMap = L.map(el, { attributionControl: false });
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(routeMap);
+  const { routes, selected, loc, pin } = routeState;
+  // Draw the alternates faintly, then the selected route bold on top.
+  routes.forEach((rt, i) => {
+    if (i !== selected) L.geoJSON(rt.geometry, { interactive: false, style: { color: '#888', weight: 3, opacity: 0.5 } }).addTo(routeMap);
+  });
+  const sel = L.geoJSON(routes[selected].geometry, { interactive: false, style: { color: '#2563eb', weight: 6, opacity: 0.9 } }).addTo(routeMap);
+  L.circleMarker([loc.lat, loc.lng], { radius: 7, color: '#fff', weight: 2, fillColor: '#16a34a', fillOpacity: 1 }).addTo(routeMap).bindTooltip('Start: ' + loc.name);
+  L.circleMarker([pin.lat, pin.lng], { radius: 7, color: '#fff', weight: 2, fillColor: '#dc2626', fillOpacity: 1 }).addTo(routeMap).bindTooltip('Pin: ' + pin.name);
+  setTimeout(() => { if (routeMap) { routeMap.invalidateSize(); try { routeMap.fitBounds(sel.getBounds().pad(0.15)); } catch (e) {} } }, 60);
+}
+
+function destroyRouteMap() {
+  if (routeMap) { try { routeMap.remove(); } catch (e) {} routeMap = null; }
+}
+
+function fmtMiles(mi) {
+  if (mi == null) return '—';
+  if (mi < 0.1) return Math.round(mi * 5280) + ' ft';
+  return (mi < 10 ? mi.toFixed(1) : Math.round(mi)) + ' mi';
+}
+
+// Print just the selected route (map + steps) via a print-only stylesheet.
+function printRoute() {
+  document.body.classList.add('printing-route');
+  if (routeMap) routeMap.invalidateSize();
+  const done = () => { document.body.classList.remove('printing-route'); window.removeEventListener('afterprint', done); };
+  window.addEventListener('afterprint', done);
+  setTimeout(() => window.print(), 200);
+}
+
 function openModal(title, html, opts = {}) {
+  // Replacing the body orphans any Leaflet map inside it (e.g. the routes map),
+  // so tear it down first. renderRoutesModal recreates it right after.
+  destroyRouteMap();
   document.getElementById('modal-title').innerHTML = title;
   document.getElementById('modal-body').innerHTML = html;
   document.getElementById('modal-box').classList.toggle('modal-wide', !!opts.wide);
@@ -3334,6 +3470,8 @@ function closeModal() {
   document.getElementById('modal-overlay').style.display = 'none';
   document.getElementById('modal-box').classList.remove('modal-wide');
   makePermanentPinId = null;
+  destroyRouteMap();
+  routeState = null;
 }
 
 async function confirmMakePermanent() {
