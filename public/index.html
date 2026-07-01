@@ -3569,13 +3569,14 @@ async function showPinTerritories(pin, opts = {}) {
   const rows = matches.map((m, i) => ({ ...m, seconds: tt.times?.[i]?.seconds ?? null, estimated: tt.times?.[i]?.estimated }));
   const anyEstimated = rows.some(r => r.estimated);
 
-  // Group by location type; sort within each group by drive time, and order
-  // the groups themselves by their nearest member.
+  // Group by location type; sort within each group by drive time (nearest
+  // first), and order the type groups themselves naturally by name (so "2 -" <
+  // "10 -" and "22 - Plumbing" < "23 - Mechanical"), matching the coverage pane.
   const groups = {};
   rows.forEach(r => { (groups[r.type._id] = groups[r.type._id] || { type: r.type, items: [] }).items.push(r); });
   const groupList = Object.values(groups);
   groupList.forEach(g => g.items.sort((a, b) => (a.seconds ?? Infinity) - (b.seconds ?? Infinity)));
-  groupList.sort((a, b) => (a.items[0].seconds ?? Infinity) - (b.items[0].seconds ?? Infinity));
+  groupList.sort((a, b) => String(a.type.name).localeCompare(String(b.type.name), undefined, { numeric: true, sensitivity: 'base' }));
 
   // Each type group is collapsible. Groups whose type isn't on the current map
   // tab, or is filtered/hidden, start collapsed to keep the list focused.
@@ -3602,8 +3603,8 @@ async function showPinTerritories(pin, opts = {}) {
   }).join('');
 
   const header = all
-    ? `Distance to all ${rows.length} filtered location${rows.length > 1 ? 's' : ''} · boundaries ignored, grouped by type, nearest first`
-    : `Covered by ${rows.length} territor${rows.length > 1 ? 'ies' : 'y'} · grouped by type, nearest first`;
+    ? `Distance to all ${rows.length} filtered location${rows.length > 1 ? 's' : ''} · boundaries ignored, grouped by type, nearest first within each`
+    : `Covered by ${rows.length} territor${rows.length > 1 ? 'ies' : 'y'} · grouped by type, nearest first within each`;
   const note = anyEstimated ? `<div class="hint" style="margin-top:8px">~ straight-line estimate (add an ORS key for real drive times)</div>` : '';
   openModal(`📌 ${escapeHtml(pin.name)}`,
     `${subtitle}<div class="hint" style="margin-bottom:2px">${header}</div>${list}${note}${actions}`, { wide: true });
