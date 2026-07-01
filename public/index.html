@@ -804,6 +804,7 @@ let filterGroups = [];
 let fgExpanded = new Set();   // which types are expanded in the filter-groups editor
 let fgPropExpanded = new Set(); // which properties are expanded in the filter-groups editor
 let fgSelectedId = null;      // group chosen in the filter-groups dropdown
+let fgOpen = false;           // filter-groups window open → defer map redraw until close
 
 // Custom-field ("property") filters: { propertyName: [hiddenValue, …] }. A
 // location is hidden when its value for an active property is in that list.
@@ -1614,7 +1615,20 @@ function currentOffTypeIds() {
 }
 
 function openFilterGroups() {
+  fgOpen = true;   // toggles inside only update state; the map redraws on close
   openModal('🎚 Filter Groups', filterGroupsHtml(), { wide: true });
+}
+
+// Redraw the map to match the current filter state. While the filter window is
+// open this is skipped (toggles just update state + the window), and it runs
+// once when the window closes — much faster than redrawing on every checkbox.
+function fgRenderMapNow() {
+  applyVisibility(); renderTypeLegend(); renderTypeList();
+}
+function fgApplyOnClose() {
+  if (!fgOpen) return;
+  fgOpen = false;
+  fgRenderMapNow();
 }
 // Re-render just the modal body (used after every toggle so the tree + saved
 // list stay in sync with the live map state).
@@ -1671,14 +1685,14 @@ function filterGroupsHtml() {
   }).join('') : '<div class="hint" style="padding:8px">No types on this map tab.</div>';
 
   return `
-    <div class="batch-hint">Filter groups are saved snapshots of what's shown on the map — like mute groups on a mixer. Toggle types/locations below (changes apply to the map live), then save the view to recall it later. Shows the <strong>${escapeHtml((mapTabs.find(t => t._id === activeMapTabId) || {}).name || 'current')}</strong> map tab.</div>
+    <div class="batch-hint">Filter groups are saved snapshots of what's shown on the map — like mute groups on a mixer. Toggle types/locations below, then save the view to recall it later. Changes apply to the map when you close this window. Shows the <strong>${escapeHtml((mapTabs.find(t => t._id === activeMapTabId) || {}).name || 'current')}</strong> map tab.</div>
     <div class="section-divider">Saved groups</div>
     <div class="fg-saved-list">${savedHtml}</div>
     <div class="row" style="gap:8px; margin-top:8px">
       <input type="text" id="fg-new-name" placeholder="Name this view (e.g. Plumbing only)" style="flex:1">
       <button class="btn btn-success btn-sm" onclick="saveCurrentFilterGroup()">＋ Save current</button>
     </div>
-    <div class="section-divider" style="margin-top:14px">What's visible <span class="hint">(applies live)</span></div>
+    <div class="section-divider" style="margin-top:14px">What's visible <span class="hint">(applies on close)</span></div>
     <div class="row" style="gap:6px; margin-bottom:6px">
       <button class="btn btn-ghost btn-sm" onclick="fgSetAll(true)">All on</button>
       <button class="btn btn-ghost btn-sm" onclick="fgSetAll(false)">All off</button>
@@ -1686,7 +1700,7 @@ function filterGroupsHtml() {
     <div class="fg-tree" id="fg-tree">${treeHtml}</div>
     ${propFilterHtml()}
     <div class="row" style="margin-top:16px; gap:8px; border-top:1px solid var(--border); padding-top:14px">
-      <button class="btn btn-ghost" onclick="closeModal()">Close</button>
+      <button class="btn btn-success" onclick="closeModal()">✓ Apply &amp; Close</button>
     </div>`;
 }
 
@@ -1713,7 +1727,7 @@ function propFilterHtml() {
       </div>${sub}
     </div>`;
   }).join('');
-  return `<div class="section-divider" style="margin-top:14px">Filter by custom field <span class="hint">(applies live)</span></div>
+  return `<div class="section-divider" style="margin-top:14px">Filter by custom field <span class="hint">(applies on close)</span></div>
     <div class="batch-hint">Uncheck values to hide them. While a field is filtered, locations that have none of the shown values (including ones with no value for it) are hidden.</div>
     <div class="fg-tree">${rows}</div>`;
 }
@@ -1733,7 +1747,7 @@ function fgTogglePropValue(i, j) {
   if (hidden.has(value)) hidden.delete(value); else hidden.add(value);
   if (hidden.size) propFilters[name] = [...hidden]; else delete propFilters[name];
   savePropFilters();
-  applyVisibility(); renderTypeLegend();
+  if (!fgOpen) fgRenderMapNow();
   refreshFilterGroupsBody();
 }
 function fgClearPropFilter(i) {
@@ -1741,7 +1755,7 @@ function fgClearPropFilter(i) {
   if (name == null) return;
   delete propFilters[name];
   savePropFilters();
-  applyVisibility(); renderTypeLegend();
+  if (!fgOpen) fgRenderMapNow();
   refreshFilterGroupsBody();
 }
 
@@ -1757,14 +1771,14 @@ function fgToggleType(id) {
   if (off) { filteredTypeIds.delete(id); hiddenTypeIds.delete(id); }
   else { filteredTypeIds.add(id); }
   saveFiltered(); saveHidden();
-  applyVisibility(); renderTypeLegend(); renderTypeList();
+  if (!fgOpen) fgRenderMapNow();
   refreshFilterGroupsBody();
 }
 
 function fgToggleLoc(id) {
   if (excludedLocIds.has(id)) excludedLocIds.delete(id); else excludedLocIds.add(id);
   saveExcluded();
-  renderTypeLegend(); renderPins(); renderCoverage();
+  if (!fgOpen) fgRenderMapNow();
   refreshFilterGroupsBody();
 }
 
@@ -1777,7 +1791,7 @@ function fgSetAll(on) {
     types.forEach(t => filteredTypeIds.add(t._id));
   }
   saveFiltered(); saveHidden(); saveExcluded();
-  applyVisibility(); renderTypeLegend(); renderTypeList();
+  if (!fgOpen) fgRenderMapNow();
   refreshFilterGroupsBody();
 }
 
@@ -1842,7 +1856,7 @@ function loadFilterGroup(id) {
   propFilters = {};
   Object.entries(g.propFilters || {}).forEach(([k, arr]) => { if (Array.isArray(arr) && arr.length) propFilters[k] = [...arr]; });
   saveFiltered(); saveHidden(); saveExcluded(); savePropFilters();
-  applyVisibility(); renderTypeLegend(); renderTypeList();
+  if (!fgOpen) fgRenderMapNow();
   refreshFilterGroupsBody();
 }
 
@@ -3872,6 +3886,7 @@ function closeModal() {
   makePermanentPinId = null;
   destroyRouteMap();
   routeState = null;
+  fgApplyOnClose();   // apply deferred filter changes to the map on close
 }
 
 async function confirmMakePermanent() {
