@@ -501,6 +501,10 @@
     .fg-loc { display: flex; align-items: center; gap: 6px; font-size: 0.78rem; padding: 2px 6px; cursor: pointer; }
     .fg-loc input { accent-color: var(--accent); }
 
+    /* ── ACTIVE-FILTER BUTTON ── */
+    .btn.filtering-on { background: var(--accent); color: #fff; box-shadow: 0 0 0 1px var(--accent), 0 0 8px var(--accent); }
+    .btn.filtering-on:hover { background: #3a7de8; color: #fff; }
+
     /* ── MAP PIN-TOGGLE CONTROL ── */
     .pin-toggle-ctrl a { font-size: 15px; line-height: 26px; text-align: center; }
     .pin-toggle-ctrl a.active { background: var(--accent); box-shadow: inset 0 0 0 2px var(--accent); }
@@ -657,7 +661,7 @@
     </div>
 
     <div class="section-divider">Location Types</div>
-    <button class="btn btn-ghost btn-sm" style="width:100%; justify-content:center; margin-bottom:6px" onclick="openFilterGroups()" title="Save and load filter views">🎚 Filter Groups</button>
+    <button id="cov-filter-btn" class="btn btn-ghost btn-sm" style="width:100%; justify-content:center; margin-bottom:6px" onclick="openFilterGroups()" title="Save and load filter views">🎚 Filter Groups</button>
     <div id="type-legend" class="type-legend">
       <span class="hint">No types yet</span>
     </div>
@@ -1336,29 +1340,29 @@ function locPropTokens(l, name) {
   const toks = raw.split(',').map(s => s.trim()).filter(s => s !== '');
   return toks.length ? [...new Set(toks)] : [''];
 }
-// Distinct values seen for a property (includes '' when some location lacks it).
+// Distinct real values seen for a property, sorted naturally.
 function propertyValues(name) {
   const vals = new Set();
-  let anyMissing = false;
-  locations.forEach(l => {
-    const toks = locPropTokens(l, name);
-    if (toks.length === 1 && toks[0] === '') anyMissing = true;
-    else toks.forEach(t => vals.add(t));
-  });
-  const out = [...vals].sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }));
-  if (anyMissing) out.push('');   // '' represents "(no value)"
-  return out;
+  locations.forEach(l => locPropTokens(l, name).forEach(t => { if (t !== '') vals.add(t); }));
+  return [...vals].sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }));
 }
-// A location is hidden by a property filter only when EVERY one of its values
-// for that property is hidden — so hiding "00" still leaves a "00, 000"
-// location visible via its "000" membership. Multiple active properties AND.
+// Whether a property has an active filter (at least one value hidden).
+function isPropFilterActive(name) {
+  return !!(propFilters[name] && propFilters[name].length);
+}
+// A location is hidden by an active property filter unless it has at least one
+// value for that property that is currently shown. So while a field is being
+// filtered, locations with no value for it (or only hidden values) drop out —
+// but a "00, 000" location stays as long as either 00 or 000 is still shown.
+// Multiple active properties AND together.
 function isLocPropHidden(l) {
   for (const name of Object.keys(propFilters)) {
     const hidden = propFilters[name];
     if (!hidden || !hidden.length) continue;
     const hiddenSet = new Set(hidden);
-    const toks = locPropTokens(l, name);
-    if (toks.every(t => hiddenSet.has(t))) return true;
+    const tokens = locPropTokens(l, name);
+    const hasShown = tokens.some(t => t !== '' && !hiddenSet.has(t));
+    if (!hasShown) return true;
   }
   return false;
 }
@@ -1574,6 +1578,20 @@ function applyVisibility() {
   renderBoundaryLayers();
 }
 
+// Any active filtering that the Filter Groups window governs: type show/hide,
+// per-location excludes, or custom-field filters.
+function anyFilterActive() {
+  return filteredTypeIds.size > 0 || hiddenTypeIds.size > 0 || excludedLocIds.size > 0 || anyPropFilterActive();
+}
+// Highlight the coverage-pane Filter Groups button while any filter is applied.
+function updateFilterButtonState() {
+  const btn = document.getElementById('cov-filter-btn');
+  if (!btn) return;
+  const on = anyFilterActive();
+  btn.classList.toggle('filtering-on', on);
+  btn.title = on ? 'Filters are active — click to manage' : 'Save and load filter views';
+}
+
 // ══════════════════════════════════
 // FILTER GROUPS  (save/load filtering state, like soundboard mute groups)
 // ══════════════════════════════════
@@ -1672,13 +1690,12 @@ function propFilterHtml() {
     const hidden = new Set(propFilters[name] || []);
     const shown = vals.length - hidden.size;
     const expanded = fgPropExpanded.has(name);
-    const sub = expanded ? `<div class="fg-sub">${vals.map((v, j) => {
-      const label = v === '' ? '<em>(no value)</em>' : escapeHtml(v);
-      return `<label class="fg-loc"><input type="checkbox" ${hidden.has(v) ? '' : 'checked'} onchange="fgTogglePropValue(${i}, ${j})"> ${label}</label>`;
-    }).join('')}</div>` : '';
+    const active = hidden.size > 0;
+    const sub = expanded ? `<div class="fg-sub">${vals.map((v, j) =>
+      `<label class="fg-loc"><input type="checkbox" ${hidden.has(v) ? '' : 'checked'} onchange="fgTogglePropValue(${i}, ${j})"> ${escapeHtml(v)}</label>`).join('')}</div>` : '';
     return `<div class="fg-type">
       <div class="fg-type-row">
-        <span class="fg-type-name" onclick="fgPropExpand(${i})">${escapeHtml(name)}</span>
+        <span class="fg-type-name" onclick="fgPropExpand(${i})">${escapeHtml(name)}${active ? ' <span class="hint" style="color:var(--accent)">●</span>' : ''}</span>
         <span class="hint" style="white-space:nowrap">${shown}/${vals.length} shown</span>
         ${hidden.size ? `<button class="btn btn-ghost btn-sm" style="padding:2px 8px" onclick="fgClearPropFilter(${i})" title="Show all values">reset</button>` : ''}
         <button class="fg-caret ${expanded ? 'open' : ''}" onclick="fgPropExpand(${i})" title="Show values">▸</button>
@@ -1686,6 +1703,7 @@ function propFilterHtml() {
     </div>`;
   }).join('');
   return `<div class="section-divider" style="margin-top:14px">Filter by custom field <span class="hint">(applies live)</span></div>
+    <div class="batch-hint">Uncheck values to hide them. While a field is filtered, locations that have none of the shown values (including ones with no value for it) are hidden.</div>
     <div class="fg-tree">${rows}</div>`;
 }
 
@@ -3474,7 +3492,7 @@ async function showPinTerritories(pin, opts = {}) {
 
   const candidates = locations.filter(l => {
     const type = locationTypes.find(t => t._id === l.typeId);
-    return type && type.layerKind !== 'boundary';
+    return type && type.layerKind !== 'boundary' && !isLocPropHidden(l);
   });
 
   let matches;
@@ -4137,6 +4155,7 @@ async function renderCoverage() {
   const mode = document.querySelector('input[name="cov-mode"]:checked')?.value || 'merged';
   const showCombined = document.getElementById('show-combined')?.checked;
   updateCombinedSettingsUi();   // keep the merged/heat hint current
+  updateFilterButtonState();    // highlight the Filter Groups button when filtering
 
   // Build coverage polygons for visible, non-excluded locations, advancing the
   // progress bar as each isochrone resolves.
