@@ -157,7 +157,7 @@ function cleanProps(p) {
 app.post('/api/locations', (req, res) => {
   const { name, typeId, address, lat, lng, customRadius, customRadiusUnit } = req.body;
   if (!name || !typeId || !lat || !lng) return res.status(400).json({ error: 'name, typeId, lat, lng required' });
-  const doc = { name, typeId, address: address || '', lat, lng, customRadius: customRadius || null, customRadiusUnit: customRadiusUnit || null, props: cleanProps(req.body.props), createdAt: Date.now() };
+  const doc = { name, typeId, address: address || '', lat, lng, customRadius: customRadius || null, customRadiusUnit: customRadiusUnit || null, props: cleanProps(req.body.props), notes: req.body.notes ? String(req.body.notes) : '', createdAt: Date.now() };
   db.locations.insert(doc, (err, newDoc) => {
     if (err) return res.status(500).json({ error: err.message });
     res.json(newDoc);
@@ -177,7 +177,7 @@ app.post('/api/locations/bulk', (req, res) => {
     docs.push({
       name: String(it.name), typeId: it.typeId, address: it.address || '', lat, lng,
       customRadius: it.customRadius || null, customRadiusUnit: it.customRadiusUnit || null,
-      props: cleanProps(it.props), createdAt: now
+      props: cleanProps(it.props), notes: it.notes ? String(it.notes) : '', createdAt: now
     });
   }
   if (!docs.length) return res.json({ inserted: 0, skipped: list.length });
@@ -206,6 +206,7 @@ app.put('/api/locations/:id', (req, res) => {
   const set = { name, address, lat, lng, customRadius, customRadiusUnit };
   if (typeId) set.typeId = typeId; // allow reassigning a location to another type
   if (req.body.props !== undefined) set.props = cleanProps(req.body.props);
+  if (req.body.notes !== undefined) set.notes = req.body.notes ? String(req.body.notes) : '';
   db.locations.update({ _id: req.params.id }, { $set: set }, {}, (err) => {
     if (err) return res.status(500).json({ error: err.message });
     db.locations.findOne({ _id: req.params.id }, (err2, doc) => res.json(doc));
