@@ -521,7 +521,7 @@
       body.printing-route .no-print,
       body.printing-route .leaflet-control-container { display: none !important; }
       body.printing-route .route-print-title { font-size: 12pt; }
-      body.printing-route #route-map { height: 3.2in; border: 1px solid #999; }
+      body.printing-route #route-map { height: 3.4in; border: 1px solid #999; break-inside: avoid; }
       body.printing-route .route-steps li { break-inside: avoid; }
     }
 
@@ -3369,10 +3369,14 @@ function drawRouteMap() {
   L.circleMarker([loc.lat, loc.lng], { radius: 7, color: '#fff', weight: 2, fillColor: '#16a34a', fillOpacity: 1 }).addTo(routeMap).bindTooltip('Start: ' + loc.name);
   L.circleMarker([pin.lat, pin.lng], { radius: 7, color: '#fff', weight: 2, fillColor: '#dc2626', fillOpacity: 1 }).addTo(routeMap).bindTooltip('Pin: ' + pin.name);
 
+  // Remember the route extent so we can re-fit after the container resizes
+  // (e.g. when the print stylesheet changes the map's dimensions).
+  routeState.bounds = boundsLL.length ? L.latLngBounds(boundsLL) : null;
+
   setTimeout(() => {
     if (!routeMap) return;
     routeMap.invalidateSize();
-    try { if (boundsLL.length) routeMap.fitBounds(L.latLngBounds(boundsLL).pad(0.15)); } catch (e) {}
+    try { if (routeState.bounds) routeMap.fitBounds(routeState.bounds.pad(0.15)); } catch (e) {}
   }, 60);
 }
 
@@ -3387,11 +3391,28 @@ function fmtMiles(mi) {
 }
 
 // Print just the selected route (map + steps) via a print-only stylesheet.
+// The print CSS gives the map a different size than on screen; Leaflet doesn't
+// re-layout on its own, so its tile/SVG panes stay at the screen size and the
+// route gets clipped. We hook beforeprint (fires once print media is applied)
+// to invalidateSize + re-fit the route to the new dimensions, then restore the
+// on-screen view afterprint.
 function printRoute() {
+  if (!routeMap) return;
+  const refit = (pad) => {
+    if (!routeMap) return;
+    routeMap.invalidateSize();
+    if (routeState && routeState.bounds) { try { routeMap.fitBounds(routeState.bounds.pad(pad)); } catch (e) {} }
+  };
+  const before = () => refit(0.08);
+  const after = () => {
+    document.body.classList.remove('printing-route');
+    window.removeEventListener('beforeprint', before);
+    window.removeEventListener('afterprint', after);
+    setTimeout(() => refit(0.15), 50);   // restore the on-screen framing
+  };
+  window.addEventListener('beforeprint', before);
+  window.addEventListener('afterprint', after);
   document.body.classList.add('printing-route');
-  if (routeMap) routeMap.invalidateSize();
-  const done = () => { document.body.classList.remove('printing-route'); window.removeEventListener('afterprint', done); };
-  window.addEventListener('afterprint', done);
   setTimeout(() => window.print(), 200);
 }
 
