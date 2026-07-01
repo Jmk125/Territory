@@ -3327,15 +3327,16 @@ function renderPins() {
     if (!visible.has(type._id)) return;
     const locs = locations.filter(l => l.typeId === type._id);
     locs.forEach(l => {
-      if (isLocPropHidden(l)) return;   // hidden by a custom-property filter
-      const excluded = excludedLocIds.has(l._id);
+      // Filtered-out locations don't appear at all (no ghost): custom-field
+      // filters or per-location excludes.
+      if (isLocPropHidden(l) || excludedLocIds.has(l._id)) return;
       const icon = L.divIcon({
         className: '',
-        html: `<div style="width:14px;height:14px;border-radius:50%;background:${type.color};border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,0.5);opacity:${excluded ? 0.3 : 1}"></div>`,
+        html: `<div style="width:14px;height:14px;border-radius:50%;background:${type.color};border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,0.5)"></div>`,
         iconSize: [14, 14], iconAnchor: [7, 7]
       });
       const marker = L.marker([l.lat, l.lng], { icon })
-        .bindTooltip(`<b>${l.name}</b><br><span style="color:#888">${type.name}${excluded ? ' · excluded' : ''}</span>`, { permanent: false, direction: 'top', offset: [0, -8] })
+        .bindTooltip(`<b>${l.name}</b><br><span style="color:#888">${type.name}</span>`, { permanent: false, direction: 'top', offset: [0, -8] })
         .on('mouseover', () => highlightLocation(l._id))
         .on('mouseout', () => clearLocationHighlight())
         .on('click', () => openLocationInfo(l._id))
@@ -3494,11 +3495,8 @@ let pinInfoPin = null;
 // ORS matrix call), then switch the open pin window into "all locations" mode.
 function confirmAllDistances() {
   if (!pinInfoPin) return;
-  const n = locations.filter(l => {
-    const t = locationTypes.find(x => x._id === l.typeId);
-    return t && t.layerKind !== 'boundary';
-  }).length;
-  if (n > 50 && !confirm(`This will calculate the driving distance from all ${n} locations to this pin (ignoring coverage boundaries). That can take a little while. Continue?`)) return;
+  const n = coverageCandidates().length;   // only the currently-visible (filtered) locations
+  if (n > 50 && !confirm(`This will calculate the driving distance from all ${n} filtered locations to this pin (ignoring coverage boundaries). That can take a little while. Continue?`)) return;
   showPinTerritories(pinInfoPin, { all: true });
 }
 
@@ -3528,8 +3526,9 @@ async function showPinTerritories(pin, opts = {}) {
 
   let matches;
   if (all) {
-    // Ignore boundaries: every location is a candidate, distance-only.
-    matches = candidates.map(l => ({ loc: l, type: locationTypes.find(t => t._id === l.typeId) }));
+    // Ignore coverage boundaries, but still respect the active filters: rank
+    // every currently-visible (filtered) location by distance.
+    matches = coverageCandidates().map(l => ({ loc: l, type: locationTypes.find(t => t._id === l.typeId) }));
   } else {
     // Which territories' coverage areas contain this point?
     const results = await Promise.all(candidates.map(async l => {
@@ -3548,7 +3547,7 @@ async function showPinTerritories(pin, opts = {}) {
   // Mode toggle + standard actions, shared by every render below.
   const toggleBtn = all
     ? `<button class="btn btn-ghost btn-sm" onclick="showPinTerritories(pinInfoPin)">↩ Only covering territories</button>`
-    : `<button class="btn btn-ghost btn-sm" onclick="confirmAllDistances()" title="Ignore coverage boundaries and rank every location by drive time">📏 Distance to every location</button>`;
+    : `<button class="btn btn-ghost btn-sm" onclick="confirmAllDistances()" title="Ignore coverage boundaries and rank every currently-visible (filtered) location by drive time">📏 Distance to Every Filtered Location</button>`;
   const actions = `<div class="row" style="margin-top:18px;gap:8px;flex-wrap:wrap">
       ${toggleBtn}
       <button class="btn btn-success btn-sm" onclick="openMakePermanent('${pin.id}')">⭐ Make Permanent</button>
@@ -3556,7 +3555,7 @@ async function showPinTerritories(pin, opts = {}) {
     </div>`;
 
   if (!matches.length) {
-    const msg = all ? 'There are no locations to measure yet.' : "This pin is not inside any territory's coverage area.";
+    const msg = all ? 'No visible locations to measure (they may all be filtered out).' : "This pin is not inside any territory's coverage area.";
     openModal(`📌 ${escapeHtml(pin.name)}`, `${subtitle}<div style="color:var(--text2);font-size:0.88rem">${msg}</div>${actions}`, { wide: true });
     return;
   }
@@ -3603,7 +3602,7 @@ async function showPinTerritories(pin, opts = {}) {
   }).join('');
 
   const header = all
-    ? `Distance to all ${rows.length} location${rows.length > 1 ? 's' : ''} · boundaries ignored, grouped by type, nearest first`
+    ? `Distance to all ${rows.length} filtered location${rows.length > 1 ? 's' : ''} · boundaries ignored, grouped by type, nearest first`
     : `Covered by ${rows.length} territor${rows.length > 1 ? 'ies' : 'y'} · grouped by type, nearest first`;
   const note = anyEstimated ? `<div class="hint" style="margin-top:8px">~ straight-line estimate (add an ORS key for real drive times)</div>` : '';
   openModal(`📌 ${escapeHtml(pin.name)}`,
