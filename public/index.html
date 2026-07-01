@@ -183,11 +183,14 @@
     #loc-info-panel {
       position: absolute; bottom: 12px; left: 12px; z-index: 810;
       background: var(--surface); border: 1px solid var(--border);
-      border-radius: var(--radius); padding: 12px 14px; width: 500px; max-width: calc(100% - 24px);
+      border-radius: var(--radius); padding: 12px 14px; width: 900px; max-width: calc(100% - 24px);
       box-shadow: 0 4px 16px rgba(0,0,0,0.4);
       max-height: calc(100% - 24px); overflow-y: auto;
       font-size: 0.8rem;
     }
+    .li-notes { white-space: pre-wrap; word-break: break-word; background: var(--surface2); border: 1px solid var(--border); border-radius: 6px; padding: 6px 9px; margin: 0 0 8px 18px; font-size: 0.78rem; line-height: 1.45; color: var(--text); max-height: 180px; overflow: auto; }
+    .loc-notes-input { width: 100%; min-height: 60px; resize: vertical; background: var(--surface2); border: 1px solid var(--border); color: var(--text); border-radius: var(--radius); padding: 8px 10px; font-size: 0.875rem; font-family: inherit; outline: none; transition: border-color 0.15s; }
+    .loc-notes-input:focus { border-color: var(--accent); }
     .li-header { display: flex; align-items: center; gap: 7px; }
     .li-dot { width: 11px; height: 11px; border-radius: 50%; flex-shrink: 0; box-shadow: 0 0 0 1px rgba(0,0,0,0.35); }
     .li-name { font-weight: 700; font-size: 0.92rem; flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -1616,9 +1619,17 @@ function openFilterGroups() {
 // Re-render just the modal body (used after every toggle so the tree + saved
 // list stay in sync with the live map state).
 function refreshFilterGroupsBody() {
-  if (document.getElementById('modal-overlay').style.display !== 'none' && document.getElementById('fg-tree')) {
-    document.getElementById('modal-body').innerHTML = filterGroupsHtml();
-  }
+  const body = document.getElementById('modal-body');
+  const box = document.getElementById('modal-box');
+  if (document.getElementById('modal-overlay').style.display === 'none' || !document.getElementById('fg-tree') || !body) return;
+  // Rebuilding the body resets scroll; capture and restore the modal scroll and
+  // each scrollable tree so checking a box doesn't jump the (long) list to top.
+  const boxTop = box ? box.scrollTop : 0;
+  const treeTops = [...body.querySelectorAll('.fg-tree')].map(el => el.scrollTop);
+  body.innerHTML = filterGroupsHtml();
+  if (box) box.scrollTop = boxTop;
+  const trees = body.querySelectorAll('.fg-tree');
+  treeTops.forEach((top, i) => { if (trees[i]) trees[i].scrollTop = top; });
 }
 
 function filterGroupsHtml() {
@@ -2066,6 +2077,7 @@ function infoPanelHtml(l, type, radiusLabel, totalArea, exclusiveArea, pctOfLoc,
       <button class="li-close" onclick="closeLocationInfo()" title="Close">✕</button>
     </div>
     <div class="li-type">${typeName}</div>
+    ${l.notes ? `<div class="li-notes">${escapeHtml(l.notes)}</div>` : ''}
     <div class="li-row"><span class="li-label">Address</span><span class="li-val">${addr}</span></div>
     <div class="li-row"><span class="li-label">Coverage radius</span><span class="li-val">${escapeHtml(radiusLabel)}</span></div>
     <div class="li-row"><span class="li-label">Total coverage</span><span class="li-val">${totalArea}</span></div>
@@ -3070,6 +3082,10 @@ function showAddLocationForm(prefill = null) {
         </div>
       </div>
       <div style="margin-top:4px">
+        <label class="field-label">Notes</label>
+        <textarea id="new-loc-notes" class="loc-notes-input" placeholder="Notes about this location (shown when you click its pin)">${escapeHtml(prefill?.notes || '')}</textarea>
+      </div>
+      <div style="margin-top:4px">
         <label class="field-label">Custom Fields <span class="hint">(for filtering — e.g. Region, Union, Tier; separate multiple values with commas)</span></label>
         <div id="loc-props"></div>
         <button type="button" class="btn btn-ghost btn-sm" onclick="addLocPropRow()" style="margin-top:4px">+ Add field</button>
@@ -3139,7 +3155,7 @@ async function saveNewLocation() {
   if (isNaN(lat) || isNaN(lng)) { alert('Valid coordinates are required. Search an address or click the map.'); return; }
 
   await fetch('/api/locations', { method: 'POST', headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({ name, typeId: selectedTypeId, address, lat, lng, customRadius, customRadiusUnit, props: collectLocProps() }) });
+    body: JSON.stringify({ name, typeId: selectedTypeId, address, lat, lng, customRadius, customRadiusUnit, props: collectLocProps(), notes: document.getElementById('new-loc-notes').value }) });
   closeAddForm();
   await loadAll();
 }
@@ -3154,7 +3170,7 @@ async function saveEditLocation(id) {
   const typeId = document.getElementById('edit-loc-type')?.value;
   if (!name || isNaN(lat) || isNaN(lng)) { alert('Name and coordinates required.'); return; }
   await fetch(`/api/locations/${id}`, { method: 'PUT', headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({ name, address, lat, lng, customRadius, customRadiusUnit, typeId, props: collectLocProps() }) });
+    body: JSON.stringify({ name, address, lat, lng, customRadius, customRadiusUnit, typeId, props: collectLocProps(), notes: document.getElementById('new-loc-notes').value }) });
   closeAddForm();
   // The reassigned location simply drops out of the currently-selected type's
   // list; the sidebar counts update on reload.
@@ -3193,7 +3209,7 @@ async function copyLocationToTypes(id) {
   const ids = Array.from(document.querySelectorAll('input[name="copy-target"]:checked')).map(e => e.value);
   if (!ids.length) { closeModal(); return; }
   const payload = ids.map(typeId => ({ name: l.name, address: l.address || '', lat: l.lat, lng: l.lng,
-    customRadius: l.customRadius || null, customRadiusUnit: l.customRadiusUnit || null, props: l.props || {}, typeId }));
+    customRadius: l.customRadius || null, customRadiusUnit: l.customRadiusUnit || null, props: l.props || {}, notes: l.notes || '', typeId }));
   await fetch('/api/locations/bulk', { method: 'POST', headers: {'Content-Type':'application/json'},
     body: JSON.stringify({ locations: payload }) }).catch(() => null);
   closeModal();
