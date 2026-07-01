@@ -3313,21 +3313,49 @@ function selectRoute(i) {
   renderRoutesModal();
 }
 
+// ORS geometry ([lng,lat]) → Leaflet latlngs ([lat,lng]). Handles Line/MultiLine.
+function geomToLatLngs(geom) {
+  if (!geom || !Array.isArray(geom.coordinates)) return [];
+  if (geom.type === 'MultiLineString') return geom.coordinates.flatMap(seg => seg.map(c => [c[1], c[0]]));
+  if (geom.type === 'LineString') return geom.coordinates.map(c => [c[1], c[0]]);
+  return [];
+}
+
 function drawRouteMap() {
   destroyRouteMap();
   const el = document.getElementById('route-map');
   if (!el || !routeState) return;
-  routeMap = L.map(el, { attributionControl: false });
-  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(routeMap);
   const { routes, selected, loc, pin } = routeState;
-  // Draw the alternates faintly, then the selected route bold on top.
+  // Start with a valid view so the map always renders even if a geometry is empty.
+  routeMap = L.map(el, { attributionControl: false })
+    .setView([(loc.lat + pin.lat) / 2, (loc.lng + pin.lng) / 2], 10);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(routeMap);
+
+  // Alternates first (faint), so the selected route sits on top.
   routes.forEach((rt, i) => {
-    if (i !== selected) L.geoJSON(rt.geometry, { interactive: false, style: { color: '#888', weight: 3, opacity: 0.5 } }).addTo(routeMap);
+    if (i === selected) return;
+    const ll = geomToLatLngs(rt.geometry);
+    if (ll.length) L.polyline(ll, { color: '#94a3b8', weight: 4, opacity: 0.6, interactive: false }).addTo(routeMap);
   });
-  const sel = L.geoJSON(routes[selected].geometry, { interactive: false, style: { color: '#2563eb', weight: 6, opacity: 0.9 } }).addTo(routeMap);
+
+  // Selected route: a white casing under a thick blue line so it pops on the map.
+  const sll = geomToLatLngs(routes[selected].geometry);
+  let boundsLL = sll;
+  if (sll.length) {
+    L.polyline(sll, { color: '#ffffff', weight: 11, opacity: 0.9, lineCap: 'round', lineJoin: 'round', interactive: false }).addTo(routeMap);
+    L.polyline(sll, { color: '#2563eb', weight: 6, opacity: 1, lineCap: 'round', lineJoin: 'round', interactive: false }).addTo(routeMap);
+  } else {
+    boundsLL = [[loc.lat, loc.lng], [pin.lat, pin.lng]];
+  }
+
   L.circleMarker([loc.lat, loc.lng], { radius: 7, color: '#fff', weight: 2, fillColor: '#16a34a', fillOpacity: 1 }).addTo(routeMap).bindTooltip('Start: ' + loc.name);
   L.circleMarker([pin.lat, pin.lng], { radius: 7, color: '#fff', weight: 2, fillColor: '#dc2626', fillOpacity: 1 }).addTo(routeMap).bindTooltip('Pin: ' + pin.name);
-  setTimeout(() => { if (routeMap) { routeMap.invalidateSize(); try { routeMap.fitBounds(sel.getBounds().pad(0.15)); } catch (e) {} } }, 60);
+
+  setTimeout(() => {
+    if (!routeMap) return;
+    routeMap.invalidateSize();
+    try { if (boundsLL.length) routeMap.fitBounds(L.latLngBounds(boundsLL).pad(0.15)); } catch (e) {}
+  }, 60);
 }
 
 function destroyRouteMap() {
