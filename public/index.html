@@ -1297,25 +1297,37 @@ function allPropertyNames() {
   locations.forEach(l => { if (l.props) Object.keys(l.props).forEach(k => names.add(k)); });
   return [...names].sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }));
 }
+// A property value can list several values separated by commas ("00, 000"), so
+// a location can belong to multiple buckets. Returns its distinct tokens, or
+// [''] when it has no value (the "(no value)" bucket).
+function locPropTokens(l, name) {
+  const raw = l.props && l.props[name] != null ? String(l.props[name]) : '';
+  const toks = raw.split(',').map(s => s.trim()).filter(s => s !== '');
+  return toks.length ? [...new Set(toks)] : [''];
+}
 // Distinct values seen for a property (includes '' when some location lacks it).
 function propertyValues(name) {
   const vals = new Set();
   let anyMissing = false;
   locations.forEach(l => {
-    const v = l.props && l.props[name] != null ? String(l.props[name]) : '';
-    if (v === '') anyMissing = true; else vals.add(v);
+    const toks = locPropTokens(l, name);
+    if (toks.length === 1 && toks[0] === '') anyMissing = true;
+    else toks.forEach(t => vals.add(t));
   });
   const out = [...vals].sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }));
   if (anyMissing) out.push('');   // '' represents "(no value)"
   return out;
 }
-// True when a location is hidden by an active property filter.
+// A location is hidden by a property filter only when EVERY one of its values
+// for that property is hidden — so hiding "00" still leaves a "00, 000"
+// location visible via its "000" membership. Multiple active properties AND.
 function isLocPropHidden(l) {
   for (const name of Object.keys(propFilters)) {
     const hidden = propFilters[name];
     if (!hidden || !hidden.length) continue;
-    const v = l.props && l.props[name] != null ? String(l.props[name]) : '';
-    if (hidden.includes(v)) return true;
+    const hiddenSet = new Set(hidden);
+    const toks = locPropTokens(l, name);
+    if (toks.every(t => hiddenSet.has(t))) return true;
   }
   return false;
 }
@@ -2223,7 +2235,7 @@ function batchConfigHtml(mode) {
       </div>
       <div class="batch-hint">Use spreadsheet column letters (A, B, C…). Address accepts a list or range to combine split fields — e.g. <code>C,B</code> joins street number then street name; <code>F-H</code> joins F, G, H in order.</div>
       <div class="section-divider" style="margin-top:12px">Custom fields <span class="hint">(optional — for filtering)</span></div>
-      <div class="batch-hint">Map extra columns to custom fields (e.g. a "Region" or "Union" column). Reuse an existing field name or type a new one.</div>
+      <div class="batch-hint">Map extra columns to custom fields (e.g. a "Region" or "Union" column). Reuse an existing field name or type a new one. A cell may list several values separated by commas (e.g. <code>00, 000</code>).</div>
       <div id="bx-props"></div>
       <button type="button" class="btn btn-ghost btn-sm" onclick="addBatchPropRow()" style="margin-top:4px">+ Add field</button>
       <datalist id="prop-name-list">${allPropertyNames().map(n => `<option value="${escapeHtml(n)}">`).join('')}</datalist>
@@ -3008,7 +3020,7 @@ function showAddLocationForm(prefill = null) {
         </div>
       </div>
       <div style="margin-top:4px">
-        <label class="field-label">Custom Fields <span class="hint">(for filtering — e.g. Region, Union, Tier)</span></label>
+        <label class="field-label">Custom Fields <span class="hint">(for filtering — e.g. Region, Union, Tier; separate multiple values with commas)</span></label>
         <div id="loc-props"></div>
         <button type="button" class="btn btn-ghost btn-sm" onclick="addLocPropRow()" style="margin-top:4px">+ Add field</button>
         <datalist id="prop-name-list">${allPropertyNames().map(n => `<option value="${escapeHtml(n)}">`).join('')}</datalist>
