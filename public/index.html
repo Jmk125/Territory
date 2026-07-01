@@ -501,6 +501,13 @@
     .fg-loc { display: flex; align-items: center; gap: 6px; font-size: 0.78rem; padding: 2px 6px; cursor: pointer; }
     .fg-loc input { accent-color: var(--accent); }
 
+    /* ── PIN DISTANCE GROUPS (collapsible) ── */
+    .pin-group { margin-top: 10px; }
+    .pin-group-head { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; cursor: pointer; user-select: none; padding: 2px 0; }
+    .pin-group-head:hover { color: var(--accent); }
+    .pin-group-head .caret { color: var(--text2); font-size: 0.8rem; transition: transform 0.15s; flex-shrink: 0; }
+    .pin-group-head:not(.collapsed) .caret { transform: rotate(90deg); }
+
     /* ── DRIVING DIRECTIONS ── */
     .route-tabs { display: flex; gap: 6px; margin-bottom: 12px; flex-wrap: wrap; }
     .route-tab { display: flex; flex-direction: column; align-items: flex-start; gap: 1px; padding: 6px 12px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface2); color: var(--text2); cursor: pointer; font-weight: 700; font-size: 0.82rem; }
@@ -3409,6 +3416,16 @@ function confirmAllDistances() {
   showPinTerritories(pinInfoPin, { all: true });
 }
 
+// Expand/collapse a type group in the pin distance window (pure DOM toggle so
+// we don't re-fetch travel times).
+function togglePinGroup(head) {
+  const body = head.nextElementSibling;
+  if (!body) return;
+  const open = body.style.display === 'none';
+  body.style.display = open ? 'block' : 'none';
+  head.classList.toggle('collapsed', !open);
+}
+
 // Click a project pin → modal listing covering territories, sorted by drive
 // time. With { all:true } it ignores coverage boundaries and lists EVERY
 // location by distance instead of only the ones whose territory contains the pin.
@@ -3475,20 +3492,29 @@ async function showPinTerritories(pin, opts = {}) {
   groupList.forEach(g => g.items.sort((a, b) => (a.seconds ?? Infinity) - (b.seconds ?? Infinity)));
   groupList.sort((a, b) => (a.items[0].seconds ?? Infinity) - (b.items[0].seconds ?? Infinity));
 
-  const list = groupList.map(g => `
-    <div style="margin-top:12px">
-      <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
-        <span style="width:11px;height:11px;border-radius:50%;background:${g.type.color};flex-shrink:0"></span>
-        <span style="font-weight:700;font-size:0.85rem">${escapeHtml(g.type.name)}</span>
-        <span class="hint">(${g.items.length})</span>
-      </div>
-      ${g.items.map(r => `
+  // Each type group is collapsible. Groups whose type isn't on the current map
+  // tab, or is filtered/hidden, start collapsed to keep the list focused.
+  const list = groupList.map(g => {
+    const onTab = (g.type.tabIds || ['default']).includes(activeMapTabId);
+    const filteredOut = filteredTypeIds.has(g.type._id) || hiddenTypeIds.has(g.type._id);
+    const collapsed = !onTab || filteredOut;
+    const tag = !onTab ? ' · other tab' : (filteredOut ? ' · filtered out' : '');
+    const items = g.items.map(r => `
         <div style="display:flex;align-items:center;gap:10px;padding:5px 0 5px 19px;border-bottom:1px solid var(--border)">
           <button class="btn btn-ghost btn-sm" style="flex-shrink:0;padding:2px 6px" onclick="showRoutes('${r.loc._id}')" title="Directions from ${escapeHtml(r.loc.name)} to this pin">🗺</button>
           <div style="flex:1;min-width:0;font-size:0.85rem;font-weight:600">${escapeHtml(r.loc.name)}</div>
           <div style="font-weight:700;color:var(--accent);white-space:nowrap">${r.estimated ? '~' : ''}${fmtDuration(r.seconds)}</div>
-        </div>`).join('')}
-    </div>`).join('');
+        </div>`).join('');
+    return `<div class="pin-group">
+      <div class="pin-group-head ${collapsed ? 'collapsed' : ''}" onclick="togglePinGroup(this)">
+        <span class="caret">▸</span>
+        <span style="width:11px;height:11px;border-radius:50%;background:${g.type.color};flex-shrink:0"></span>
+        <span style="font-weight:700;font-size:0.85rem">${escapeHtml(g.type.name)}</span>
+        <span class="hint">(${g.items.length})${tag}</span>
+      </div>
+      <div class="pin-group-body" style="display:${collapsed ? 'none' : 'block'}">${items}</div>
+    </div>`;
+  }).join('');
 
   const header = all
     ? `Distance to all ${rows.length} location${rows.length > 1 ? 's' : ''} · boundaries ignored, grouped by type, nearest first`
