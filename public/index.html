@@ -778,6 +778,7 @@ let expandedTypeIds = new Set();
 // locations are shown on the map. Persisted in localStorage.
 let filterGroups = [];
 let fgExpanded = new Set();   // which types are expanded in the filter-groups editor
+let fgSelectedId = null;      // group chosen in the filter-groups dropdown
 
 // Appearance of the "show all types combined" overlay (single color + opacity),
 // applied to both the merged blob and the combined heat map. Persisted.
@@ -1507,14 +1508,19 @@ function refreshFilterGroupsBody() {
 }
 
 function filterGroupsHtml() {
+  // Keep the dropdown selection valid across re-renders.
+  if (!filterGroups.some(g => g.id === fgSelectedId)) fgSelectedId = filterGroups.length ? filterGroups[0].id : null;
+  const selected = filterGroups.find(g => g.id === fgSelectedId);
   const savedHtml = filterGroups.length
-    ? filterGroups.map(g => `<div class="fg-saved">
-        <button class="btn btn-success btn-sm" onclick="loadFilterGroup('${g.id}')" title="Load onto the map">▶ Load</button>
-        <span class="fg-saved-name">${escapeHtml(g.name)}</span>
-        <span class="hint" style="white-space:nowrap">${(g.offTypes || []).length} type(s), ${(g.excluded || []).length} loc(s) hidden</span>
-        <button class="btn btn-ghost btn-sm" onclick="updateFilterGroup('${g.id}')" title="Overwrite with the current map filter">💾</button>
-        <button class="btn btn-danger btn-sm" onclick="deleteFilterGroup('${g.id}')" title="Delete">✕</button>
-      </div>`).join('')
+    ? `<div class="row" style="gap:8px; align-items:center">
+        <select id="fg-select" style="flex:1" onchange="fgSelect(this.value)">
+          ${filterGroups.map(g => `<option value="${g.id}" ${g.id === fgSelectedId ? 'selected' : ''}>${escapeHtml(g.name)}</option>`).join('')}
+        </select>
+        <button class="btn btn-success btn-sm" onclick="loadSelectedFilterGroup()" title="Load onto the map">▶ Load</button>
+        <button class="btn btn-ghost btn-sm" onclick="updateSelectedFilterGroup()" title="Overwrite this group with the current map filter">💾</button>
+        <button class="btn btn-danger btn-sm" onclick="deleteSelectedFilterGroup()" title="Delete this group">✕</button>
+      </div>
+      ${selected ? `<div class="hint" style="margin-top:4px">${(selected.offTypes || []).length} type(s), ${(selected.excluded || []).length} location(s) hidden in this group.</div>` : ''}`
     : '<div class="hint">No saved groups yet. Set what you want visible below, name it, and hit “Save current”.</div>';
 
   const types = sortedTypes(locationTypes.filter(t => (t.tabIds || ['default']).includes(activeMapTabId)));
@@ -1598,10 +1604,21 @@ function saveCurrentFilterGroup() {
   const nameEl = document.getElementById('fg-new-name');
   const name = (nameEl ? nameEl.value : '').trim();
   if (!name) { alert('Give the filter group a name first.'); return; }
-  filterGroups.push({ id: 'fg' + Date.now(), name, offTypes: currentOffTypeIds(), excluded: [...excludedLocIds] });
+  const id = 'fg' + Date.now();
+  filterGroups.push({ id, name, offTypes: currentOffTypeIds(), excluded: [...excludedLocIds] });
+  fgSelectedId = id;               // preselect the one just saved
   saveFilterGroups();
   refreshFilterGroupsBody();
 }
+
+// Dropdown selection changed — remember it and refresh the "N hidden" hint.
+function fgSelect(id) {
+  fgSelectedId = id;
+  refreshFilterGroupsBody();
+}
+function loadSelectedFilterGroup()   { if (fgSelectedId) loadFilterGroup(fgSelectedId); }
+function updateSelectedFilterGroup() { if (fgSelectedId) updateFilterGroup(fgSelectedId); }
+function deleteSelectedFilterGroup() { if (fgSelectedId) deleteFilterGroup(fgSelectedId); }
 
 function updateFilterGroup(id) {
   const g = filterGroups.find(x => x.id === id);
@@ -1617,6 +1634,7 @@ function deleteFilterGroup(id) {
   const g = filterGroups.find(x => x.id === id);
   if (!g || !confirm(`Delete filter group "${g.name}"?`)) return;
   filterGroups = filterGroups.filter(x => x.id !== id);
+  if (fgSelectedId === id) fgSelectedId = filterGroups.length ? filterGroups[0].id : null;
   saveFilterGroups();
   refreshFilterGroupsBody();
 }
