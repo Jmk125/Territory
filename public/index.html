@@ -476,6 +476,10 @@
     .copy-target:hover { background: var(--surface2); }
     .copy-target input { accent-color: var(--accent); }
 
+    /* ── CUSTOM FIELDS (properties) ── */
+    .prop-row, .bxp-row { display: flex; gap: 6px; align-items: center; margin-bottom: 4px; }
+    .prop-row .prop-name, .prop-row .prop-val, .bxp-row .bxp-name { flex: 1; min-width: 0; }
+
     /* ── INLINE HELP ── */
     .help-dot { display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; border-radius: 50%; border: 1px solid var(--accent); background: none; color: var(--accent); font-size: 0.7rem; font-weight: 700; cursor: pointer; vertical-align: middle; line-height: 1; }
     .help-dot:hover { background: var(--accent); color: #fff; }
@@ -778,7 +782,13 @@ let expandedTypeIds = new Set();
 // locations are shown on the map. Persisted in localStorage.
 let filterGroups = [];
 let fgExpanded = new Set();   // which types are expanded in the filter-groups editor
+let fgPropExpanded = new Set(); // which properties are expanded in the filter-groups editor
 let fgSelectedId = null;      // group chosen in the filter-groups dropdown
+
+// Custom-field ("property") filters: { propertyName: [hiddenValue, …] }. A
+// location is hidden when its value for an active property is in that list.
+// Persisted, and captured/restored by filter groups.
+let propFilters = {};
 
 // Appearance of the "show all types combined" overlay (single color + opacity),
 // applied to both the merged blob and the combined heat map. Persisted.
@@ -859,6 +869,7 @@ async function boot() {
   loadHidden();
   loadFiltered();
   loadFilterGroups();
+  loadPropFilters();
   loadCombinedSettings();
   progressSet(0);
   await loadData();
@@ -1274,8 +1285,50 @@ function coverageCandidates() {
   const visibleTypeIds = getVisibleTypeIds();
   return locations.filter(l => {
     const type = locationTypes.find(t => t._id === l.typeId);
-    return type && type.layerKind !== 'boundary' && visibleTypeIds.has(l.typeId) && !excludedLocIds.has(l._id);
+    return type && type.layerKind !== 'boundary' && visibleTypeIds.has(l.typeId)
+      && !excludedLocIds.has(l._id) && !isLocPropHidden(l);
   });
+}
+
+// ── Custom properties (filtering fields) ───────────────────────────
+// Distinct property names across all locations, sorted naturally.
+function allPropertyNames() {
+  const names = new Set();
+  locations.forEach(l => { if (l.props) Object.keys(l.props).forEach(k => names.add(k)); });
+  return [...names].sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }));
+}
+// Distinct values seen for a property (includes '' when some location lacks it).
+function propertyValues(name) {
+  const vals = new Set();
+  let anyMissing = false;
+  locations.forEach(l => {
+    const v = l.props && l.props[name] != null ? String(l.props[name]) : '';
+    if (v === '') anyMissing = true; else vals.add(v);
+  });
+  const out = [...vals].sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }));
+  if (anyMissing) out.push('');   // '' represents "(no value)"
+  return out;
+}
+// True when a location is hidden by an active property filter.
+function isLocPropHidden(l) {
+  for (const name of Object.keys(propFilters)) {
+    const hidden = propFilters[name];
+    if (!hidden || !hidden.length) continue;
+    const v = l.props && l.props[name] != null ? String(l.props[name]) : '';
+    if (hidden.includes(v)) return true;
+  }
+  return false;
+}
+function anyPropFilterActive() {
+  return Object.values(propFilters).some(a => a && a.length);
+}
+function loadPropFilters() {
+  try { propFilters = JSON.parse(localStorage.getItem('propFilters') || '{}') || {}; }
+  catch (e) { propFilters = {}; }
+  if (typeof propFilters !== 'object' || Array.isArray(propFilters)) propFilters = {};
+}
+function savePropFilters() {
+  localStorage.setItem('propFilters', JSON.stringify(propFilters));
 }
 
 // Warm the polygon cache (with progress) without drawing — used during splash
@@ -1559,9 +1612,65 @@ function filterGroupsHtml() {
       <button class="btn btn-ghost btn-sm" onclick="fgSetAll(false)">All off</button>
     </div>
     <div class="fg-tree" id="fg-tree">${treeHtml}</div>
+    ${propFilterHtml()}
     <div class="row" style="margin-top:16px; gap:8px; border-top:1px solid var(--border); padding-top:14px">
       <button class="btn btn-ghost" onclick="closeModal()">Close</button>
     </div>`;
+}
+
+// Property (custom-field) filter section for the filter-groups window. Uncheck
+// a value to hide every location that has it (or lacks the field, via "(no
+// value)"). Handlers take name/value indices to sidestep quoting.
+function propFilterHtml() {
+  const names = allPropertyNames();
+  if (!names.length) return '';
+  const rows = names.map((name, i) => {
+    const vals = propertyValues(name);
+    const hidden = new Set(propFilters[name] || []);
+    const shown = vals.length - hidden.size;
+    const expanded = fgPropExpanded.has(name);
+    const sub = expanded ? `<div class="fg-sub">${vals.map((v, j) => {
+      const label = v === '' ? '<em>(no value)</em>' : escapeHtml(v);
+      return `<label class="fg-loc"><input type="checkbox" ${hidden.has(v) ? '' : 'checked'} onchange="fgTogglePropValue(${i}, ${j})"> ${label}</label>`;
+    }).join('')}</div>` : '';
+    return `<div class="fg-type">
+      <div class="fg-type-row">
+        <span class="fg-type-name" onclick="fgPropExpand(${i})">${escapeHtml(name)}</span>
+        <span class="hint" style="white-space:nowrap">${shown}/${vals.length} shown</span>
+        ${hidden.size ? `<button class="btn btn-ghost btn-sm" style="padding:2px 8px" onclick="fgClearPropFilter(${i})" title="Show all values">reset</button>` : ''}
+        <button class="fg-caret ${expanded ? 'open' : ''}" onclick="fgPropExpand(${i})" title="Show values">▸</button>
+      </div>${sub}
+    </div>`;
+  }).join('');
+  return `<div class="section-divider" style="margin-top:14px">Filter by custom field <span class="hint">(applies live)</span></div>
+    <div class="fg-tree">${rows}</div>`;
+}
+
+function fgPropExpand(i) {
+  const name = allPropertyNames()[i];
+  if (name == null) return;
+  if (fgPropExpanded.has(name)) fgPropExpanded.delete(name); else fgPropExpanded.add(name);
+  refreshFilterGroupsBody();
+}
+function fgTogglePropValue(i, j) {
+  const name = allPropertyNames()[i];
+  if (name == null) return;
+  const value = propertyValues(name)[j];
+  if (value === undefined) return;
+  const hidden = new Set(propFilters[name] || []);
+  if (hidden.has(value)) hidden.delete(value); else hidden.add(value);
+  if (hidden.size) propFilters[name] = [...hidden]; else delete propFilters[name];
+  savePropFilters();
+  applyVisibility(); renderTypeLegend();
+  refreshFilterGroupsBody();
+}
+function fgClearPropFilter(i) {
+  const name = allPropertyNames()[i];
+  if (name == null) return;
+  delete propFilters[name];
+  savePropFilters();
+  applyVisibility(); renderTypeLegend();
+  refreshFilterGroupsBody();
 }
 
 function fgToggleExpand(id) {
@@ -1605,7 +1714,7 @@ function saveCurrentFilterGroup() {
   const name = (nameEl ? nameEl.value : '').trim();
   if (!name) { alert('Give the filter group a name first.'); return; }
   const id = 'fg' + Date.now();
-  filterGroups.push({ id, name, offTypes: currentOffTypeIds(), excluded: [...excludedLocIds] });
+  filterGroups.push({ id, name, offTypes: currentOffTypeIds(), excluded: [...excludedLocIds], propFilters: clonePropFilters() });
   fgSelectedId = id;               // preselect the one just saved
   saveFilterGroups();
   refreshFilterGroupsBody();
@@ -1626,8 +1735,16 @@ function updateFilterGroup(id) {
   if (!confirm(`Overwrite "${g.name}" with the current map filter?`)) return;
   g.offTypes = currentOffTypeIds();
   g.excluded = [...excludedLocIds];
+  g.propFilters = clonePropFilters();
   saveFilterGroups();
   refreshFilterGroupsBody();
+}
+
+// Deep copy of the active property filters (only non-empty entries).
+function clonePropFilters() {
+  const out = {};
+  Object.keys(propFilters).forEach(k => { if (propFilters[k] && propFilters[k].length) out[k] = [...propFilters[k]]; });
+  return out;
 }
 
 function deleteFilterGroup(id) {
@@ -1650,7 +1767,9 @@ function loadFilterGroup(id) {
   filteredTypeIds = new Set((g.offTypes || []).filter(x => liveTypes.has(x)));
   hiddenTypeIds = new Set();
   excludedLocIds = new Set((g.excluded || []).filter(x => liveLocs.has(x)));
-  saveFiltered(); saveHidden(); saveExcluded();
+  propFilters = {};
+  Object.entries(g.propFilters || {}).forEach(([k, arr]) => { if (Array.isArray(arr) && arr.length) propFilters[k] = [...arr]; });
+  saveFiltered(); saveHidden(); saveExcluded(); savePropFilters();
   applyVisibility(); renderTypeLegend(); renderTypeList();
   refreshFilterGroupsBody();
 }
@@ -2103,18 +2222,51 @@ function batchConfigHtml(mode) {
         <div><label class="field-label">Longitude column *</label><input type="text" id="bx-lng" placeholder="e.g. L" oninput="renderBatchPreview()"></div>
       </div>
       <div class="batch-hint">Use spreadsheet column letters (A, B, C…). Address accepts a list or range to combine split fields — e.g. <code>C,B</code> joins street number then street name; <code>F-H</code> joins F, G, H in order.</div>
+      <div class="section-divider" style="margin-top:12px">Custom fields <span class="hint">(optional — for filtering)</span></div>
+      <div class="batch-hint">Map extra columns to custom fields (e.g. a "Region" or "Union" column). Reuse an existing field name or type a new one.</div>
+      <div id="bx-props"></div>
+      <button type="button" class="btn btn-ghost btn-sm" onclick="addBatchPropRow()" style="margin-top:4px">+ Add field</button>
+      <datalist id="prop-name-list">${allPropertyNames().map(n => `<option value="${escapeHtml(n)}">`).join('')}</datalist>
       <div class="section-divider" style="margin-top:12px">Sheet preview <span class="hint" id="bx-fname"></span></div>
       <div class="batch-preview-wrap" id="bx-preview"></div>
       <div id="bx-summary"></div>
     </div>`;
 }
 
+// Custom-field → column rows in the batch importer.
+function batchPropRowEl(name, col) {
+  const div = document.createElement('div');
+  div.className = 'bxp-row';
+  div.innerHTML = `<input type="text" class="bxp-name" list="prop-name-list" placeholder="Field name (e.g. Region)" value="${escapeHtml(name || '')}" oninput="renderBatchPreview()">
+    <input type="text" class="bxp-col" placeholder="Column (e.g. M)" value="${escapeHtml(col || '')}" oninput="renderBatchPreview()" style="max-width:130px">
+    <button type="button" class="btn btn-ghost btn-sm" title="Remove field" onclick="this.parentElement.remove(); renderBatchPreview()">✕</button>`;
+  return div;
+}
+function addBatchPropRow() {
+  const host = document.getElementById('bx-props');
+  if (host) host.appendChild(batchPropRowEl('', ''));
+}
+// Read the batch custom-field mappings ({ name, idx }) from the DOM.
+function batchPropMappings() {
+  const out = [];
+  document.querySelectorAll('#bx-props .bxp-row').forEach(row => {
+    const name = row.querySelector('.bxp-name').value.trim();
+    const idx = colLetterToIndex(row.querySelector('.bxp-col').value);
+    if (name && idx >= 0) out.push({ name, idx });
+  });
+  return out;
+}
+
 // Snapshot the current column mapping (used to restore the batch tab after the
 // user steps into the review window and comes back).
 function snapshotBatchMapping() {
   const v = id => { const el = document.getElementById(id); return el ? el.value : ''; };
+  const props = [];
+  document.querySelectorAll('#bx-props .bxp-row').forEach(row => {
+    props.push({ name: row.querySelector('.bxp-name').value, col: row.querySelector('.bxp-col').value });
+  });
   batchMapping = { start: v('bx-start'), end: v('bx-end'), type: v('bx-type'),
-    name: v('bx-name'), addr: v('bx-addr'), lat: v('bx-lat'), lng: v('bx-lng') };
+    name: v('bx-name'), addr: v('bx-addr'), lat: v('bx-lat'), lng: v('bx-lng'), props };
 }
 
 function restoreBatchState() {
@@ -2128,6 +2280,11 @@ function restoreBatchState() {
     set('bx-start', batchMapping.start); set('bx-end', batchMapping.end); set('bx-type', batchMapping.type);
     set('bx-name', batchMapping.name); set('bx-addr', batchMapping.addr);
     set('bx-lat', batchMapping.lat); set('bx-lng', batchMapping.lng);
+    const host = document.getElementById('bx-props');
+    if (host && Array.isArray(batchMapping.props)) {
+      host.innerHTML = '';
+      batchMapping.props.forEach(p => host.appendChild(batchPropRowEl(p.name, p.col)));
+    }
   }
   renderBatchPreview();
 }
@@ -2252,7 +2409,7 @@ async function createTypesFromReview() {
       typeId = newType._id;
     }
     lastTypeId = typeId;
-    const payload = g.locations.map(l => ({ name: l.name, address: l.address, lat: l.lat, lng: l.lng, typeId }));
+    const payload = g.locations.map(l => ({ name: l.name, address: l.address, lat: l.lat, lng: l.lng, props: l.props || {}, typeId }));
     const resp = await fetch('/api/locations/bulk', { method: 'POST', headers: {'Content-Type':'application/json'},
       body: JSON.stringify({ locations: payload }) }).then(r => r.json()).catch(() => null);
     totalLocs += (resp && resp.inserted) || 0;
@@ -2296,7 +2453,7 @@ function openSingleBatchImporter(typeId) {
 async function confirmSingleBatch(typeId) {
   const res = buildBatchRows();
   if (res.incomplete || !res.rows.length) return;
-  const payload = res.rows.map(l => ({ name: l.name, address: l.address, lat: l.lat, lng: l.lng, typeId }));
+  const payload = res.rows.map(l => ({ name: l.name, address: l.address, lat: l.lat, lng: l.lng, props: l.props || {}, typeId }));
   const resp = await fetch('/api/locations/bulk', { method: 'POST', headers: {'Content-Type':'application/json'},
     body: JSON.stringify({ locations: payload }) }).then(r => r.json()).catch(() => null);
   batchSheet = null; batchFileName = '';
@@ -2441,6 +2598,7 @@ function buildBatchRows() {
   const endRaw = parseInt(g('bx-end').value, 10);
   const s = startRaw >= 1 ? startRaw : 1;
   const e = endRaw >= 1 ? Math.min(endRaw, batchSheet.length) : batchSheet.length;
+  const propMaps = batchPropMappings();
   if (nameIdx < 0 || latIdx < 0 || lngIdx < 0 || (hasType && typeIdx < 0))
     return { rows: [], skipped: 0, total: Math.max(0, e - s + 1), types: 0, incomplete: true };
   const rows = []; const typeSet = new Set(); let skipped = 0, total = 0;
@@ -2452,6 +2610,9 @@ function buildBatchRows() {
     const address = addrIdxs.map(i => String(arr[i] ?? '').trim()).filter(Boolean).join(' ');
     const lat = parseFloat(arr[latIdx]);
     const lng = parseFloat(arr[lngIdx]);
+    // Custom fields mapped to columns → this row's props object.
+    const props = {};
+    propMaps.forEach(pm => { const v = String(arr[pm.idx] ?? '').trim(); if (v) props[pm.name] = v; });
     // One cell may list several types ("22 - Plumbing, 23 - Mechanical"): the
     // location is added to each, so split on commas/semicolons and emit a row
     // per type. (De-duped so "22, 22" doesn't double-add.)
@@ -2461,7 +2622,7 @@ function buildBatchRows() {
     const badCoord = !isFinite(lat) || !isFinite(lng) || lat < -90 || lat > 90 || lng < -180 || lng > 180;
     if (!name || badCoord || (hasType && !typeNames.length)) { skipped++; continue; }
     for (const typeName of typeNames) {
-      rows.push({ typeName, name, address, lat, lng });
+      rows.push({ typeName, name, address, lat, lng, props });
       if (hasType) typeSet.add(typeName);
     }
   }
@@ -2480,7 +2641,8 @@ function renderBatchPreview() {
   const start = parseInt(g('bx-start').value, 10);
   const end = parseInt(g('bx-end').value, 10);
   const colCount = batchSheet.reduce((m, r) => Math.max(m, r ? r.length : 0), 0);
-  const hit = i => i === nameIdx || i === latIdx || i === lngIdx || i === typeIdx || addrIdxs.has(i);
+  const propIdxs = new Set(batchPropMappings().map(pm => pm.idx));
+  const hit = i => i === nameIdx || i === latIdx || i === lngIdx || i === typeIdx || addrIdxs.has(i) || propIdxs.has(i);
 
   let html = '<table class="batch-table"><thead><tr><th class="row-num">#</th>';
   for (let i = 0; i < colCount; i++) html += `<th class="${hit(i) ? 'col-hit' : ''}">${indexToColLetter(i)}</th>`;
@@ -2618,11 +2780,35 @@ function editLocationType(id) {
     </div>
     ${colorField}${coverageFields}
     <div style="margin-top:16px">${tabCheckboxesHtml('et', t.tabIds)}</div>
+    ${isBoundary ? '' : `
+    <div class="section-divider" style="margin-top:16px">Custom fields <span class="hint">(for filtering)</span></div>
+    <div class="batch-hint">Set a custom field on all ${locations.filter(l => l.typeId === id).length} location(s) of this type at once.</div>
+    <div class="row" style="gap:8px; align-items:flex-end; margin-top:6px">
+      <div style="flex:1"><label class="field-label">Field</label><input type="text" id="et-prop-name" list="prop-name-list" placeholder="e.g. Region"></div>
+      <div style="flex:1"><label class="field-label">Value</label><input type="text" id="et-prop-val" placeholder="e.g. North"></div>
+      <button type="button" class="btn btn-primary btn-sm" onclick="applyTypeProp('${id}')">Apply to all</button>
+    </div>
+    <datalist id="prop-name-list">${allPropertyNames().map(n => `<option value="${escapeHtml(n)}">`).join('')}</datalist>`}
     <div class="row" style="margin-top:18px; gap:8px">
       <button class="btn btn-success" onclick="saveLocationType('${id}')">💾 Save Changes</button>
       <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
     </div>`);
   if (!isBoundary) updateStylePreview('et');
+}
+
+// Set one custom field on every location of a type (from the edit-type modal).
+async function applyTypeProp(id) {
+  const name = document.getElementById('et-prop-name').value.trim();
+  const value = document.getElementById('et-prop-val').value.trim();
+  if (!name) { alert('Enter a field name.'); return; }
+  const cnt = locations.filter(l => l.typeId === id).length;
+  if (!cnt) { alert('This type has no locations yet.'); return; }
+  if (!confirm(`Set "${name}" = "${value}" on all ${cnt} location(s) of this type?`)) return;
+  await fetch('/api/locations/set-prop', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ typeId: id, name, value }) }).catch(() => null);
+  document.getElementById('et-prop-name').value = '';
+  document.getElementById('et-prop-val').value = '';
+  await loadAll();
 }
 
 async function saveLocationType(id) {
@@ -2821,12 +3007,48 @@ function showAddLocationForm(prefill = null) {
           </select>
         </div>
       </div>
+      <div style="margin-top:4px">
+        <label class="field-label">Custom Fields <span class="hint">(for filtering — e.g. Region, Union, Tier)</span></label>
+        <div id="loc-props"></div>
+        <button type="button" class="btn btn-ghost btn-sm" onclick="addLocPropRow()" style="margin-top:4px">+ Add field</button>
+        <datalist id="prop-name-list">${allPropertyNames().map(n => `<option value="${escapeHtml(n)}">`).join('')}</datalist>
+      </div>
       <div class="row">
         <button class="btn btn-success" onclick="${prefill ? `saveEditLocation('${prefill._id}')` : 'saveNewLocation()'}">${prefill ? '💾 Save Changes' : '+ Add Location'}</button>
         ${prefill ? '' : `<button class="btn btn-primary" onclick="openSingleBatchImporter('${selectedTypeId}')" title="Import many locations from a spreadsheet or CSV">📂 Batch Add</button>`}
         <button class="btn btn-ghost" onclick="closeAddForm()">Cancel</button>
       </div>
     </div>`;
+  renderLocPropRows(prefill && prefill.props);
+}
+
+// Custom-field rows in the add/edit location form.
+function locPropRowEl(name, val) {
+  const div = document.createElement('div');
+  div.className = 'prop-row';
+  div.innerHTML = `<input type="text" class="prop-name" list="prop-name-list" placeholder="Field" value="${escapeHtml(name)}">
+    <input type="text" class="prop-val" placeholder="Value" value="${escapeHtml(val)}">
+    <button type="button" class="btn btn-ghost btn-sm" title="Remove field" onclick="this.parentElement.remove()">✕</button>`;
+  return div;
+}
+function renderLocPropRows(props) {
+  const host = document.getElementById('loc-props');
+  if (!host) return;
+  host.innerHTML = '';
+  Object.entries(props || {}).forEach(([k, v]) => host.appendChild(locPropRowEl(k, v)));
+}
+function addLocPropRow() {
+  const host = document.getElementById('loc-props');
+  if (host) host.appendChild(locPropRowEl('', ''));
+}
+function collectLocProps() {
+  const out = {};
+  document.querySelectorAll('#loc-props .prop-row').forEach(row => {
+    const n = row.querySelector('.prop-name').value.trim();
+    const v = row.querySelector('.prop-val').value.trim();
+    if (n) out[n] = v;
+  });
+  return out;
 }
 
 function editLocation(id) {
@@ -2855,7 +3077,7 @@ async function saveNewLocation() {
   if (isNaN(lat) || isNaN(lng)) { alert('Valid coordinates are required. Search an address or click the map.'); return; }
 
   await fetch('/api/locations', { method: 'POST', headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({ name, typeId: selectedTypeId, address, lat, lng, customRadius, customRadiusUnit }) });
+    body: JSON.stringify({ name, typeId: selectedTypeId, address, lat, lng, customRadius, customRadiusUnit, props: collectLocProps() }) });
   closeAddForm();
   await loadAll();
 }
@@ -2870,7 +3092,7 @@ async function saveEditLocation(id) {
   const typeId = document.getElementById('edit-loc-type')?.value;
   if (!name || isNaN(lat) || isNaN(lng)) { alert('Name and coordinates required.'); return; }
   await fetch(`/api/locations/${id}`, { method: 'PUT', headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({ name, address, lat, lng, customRadius, customRadiusUnit, typeId }) });
+    body: JSON.stringify({ name, address, lat, lng, customRadius, customRadiusUnit, typeId, props: collectLocProps() }) });
   closeAddForm();
   // The reassigned location simply drops out of the currently-selected type's
   // list; the sidebar counts update on reload.
@@ -2909,7 +3131,7 @@ async function copyLocationToTypes(id) {
   const ids = Array.from(document.querySelectorAll('input[name="copy-target"]:checked')).map(e => e.value);
   if (!ids.length) { closeModal(); return; }
   const payload = ids.map(typeId => ({ name: l.name, address: l.address || '', lat: l.lat, lng: l.lng,
-    customRadius: l.customRadius || null, customRadiusUnit: l.customRadiusUnit || null, typeId }));
+    customRadius: l.customRadius || null, customRadiusUnit: l.customRadiusUnit || null, props: l.props || {}, typeId }));
   await fetch('/api/locations/bulk', { method: 'POST', headers: {'Content-Type':'application/json'},
     body: JSON.stringify({ locations: payload }) }).catch(() => null);
   closeModal();
@@ -3000,6 +3222,7 @@ function renderPins() {
     if (!visible.has(type._id)) return;
     const locs = locations.filter(l => l.typeId === type._id);
     locs.forEach(l => {
+      if (isLocPropHidden(l)) return;   // hidden by a custom-property filter
       const excluded = excludedLocIds.has(l._id);
       const icon = L.divIcon({
         className: '',
