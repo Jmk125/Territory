@@ -139,10 +139,25 @@ app.get('/api/locations', (req, res) => {
   });
 });
 
+// Custom filtering fields live in a flat { name: value } object of trimmed
+// strings. Anything else (arrays, objects, blank keys) is dropped.
+function cleanProps(p) {
+  if (!p || typeof p !== 'object' || Array.isArray(p)) return {};
+  const out = {};
+  for (const k of Object.keys(p)) {
+    const key = String(k).trim();
+    if (!key) continue;
+    const v = p[k];
+    if (v == null) continue;
+    out[key] = String(v).trim();
+  }
+  return out;
+}
+
 app.post('/api/locations', (req, res) => {
   const { name, typeId, address, lat, lng, customRadius, customRadiusUnit } = req.body;
   if (!name || !typeId || !lat || !lng) return res.status(400).json({ error: 'name, typeId, lat, lng required' });
-  const doc = { name, typeId, address: address || '', lat, lng, customRadius: customRadius || null, customRadiusUnit: customRadiusUnit || null, createdAt: Date.now() };
+  const doc = { name, typeId, address: address || '', lat, lng, customRadius: customRadius || null, customRadiusUnit: customRadiusUnit || null, props: cleanProps(req.body.props), createdAt: Date.now() };
   db.locations.insert(doc, (err, newDoc) => {
     if (err) return res.status(500).json({ error: err.message });
     res.json(newDoc);
@@ -161,7 +176,8 @@ app.post('/api/locations/bulk', (req, res) => {
     if (!it.name || !it.typeId || !Number.isFinite(lat) || !Number.isFinite(lng)) continue;
     docs.push({
       name: String(it.name), typeId: it.typeId, address: it.address || '', lat, lng,
-      customRadius: it.customRadius || null, customRadiusUnit: it.customRadiusUnit || null, createdAt: now
+      customRadius: it.customRadius || null, customRadiusUnit: it.customRadiusUnit || null,
+      props: cleanProps(it.props), createdAt: now
     });
   }
   if (!docs.length) return res.json({ inserted: 0, skipped: list.length });
@@ -172,10 +188,24 @@ app.post('/api/locations/bulk', (req, res) => {
   });
 });
 
+// Set one custom property on every location of a type (type-level bulk assign).
+app.post('/api/locations/set-prop', (req, res) => {
+  const typeId = req.body.typeId;
+  const key = String(req.body.name || '').trim();
+  if (!typeId || !key) return res.status(400).json({ error: 'typeId and name required' });
+  const val = req.body.value == null ? '' : String(req.body.value).trim();
+  const set = {}; set['props.' + key] = val;
+  db.locations.update({ typeId }, { $set: set }, { multi: true }, (err, num) => {
+    if (err) return res.status(500).json({ error: err.message });
+    res.json({ updated: num });
+  });
+});
+
 app.put('/api/locations/:id', (req, res) => {
   const { name, address, lat, lng, customRadius, customRadiusUnit, typeId } = req.body;
   const set = { name, address, lat, lng, customRadius, customRadiusUnit };
   if (typeId) set.typeId = typeId; // allow reassigning a location to another type
+  if (req.body.props !== undefined) set.props = cleanProps(req.body.props);
   db.locations.update({ _id: req.params.id }, { $set: set }, {}, (err) => {
     if (err) return res.status(500).json({ error: err.message });
     db.locations.findOne({ _id: req.params.id }, (err2, doc) => res.json(doc));
