@@ -1933,7 +1933,8 @@ function renderTypeLegend() {
         </div>
       </div>`;
     }
-    const locs = locations.filter(l => l.typeId === t._id);
+    // Locations hidden by a custom-field filter drop out of the legend list too.
+    const locs = locations.filter(l => l.typeId === t._id && !isLocPropHidden(l));
     const excludedCount = locs.filter(l => excludedLocIds.has(l._id)).length;
     const expanded = expandedTypeIds.has(t._id);
     const drawn = !filteredTypeIds.has(t._id);
