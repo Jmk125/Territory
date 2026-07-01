@@ -1656,11 +1656,15 @@ function filterGroupsHtml() {
           ${filterGroups.map(g => `<option value="${g.id}" ${g.id === fgSelectedId ? 'selected' : ''}>${escapeHtml(g.name)}</option>`).join('')}
         </select>
         <button class="btn btn-success btn-sm" onclick="loadSelectedFilterGroup()" title="Load onto the map">▶ Load</button>
+        <button class="btn btn-ghost btn-sm" onclick="fgClearAllFilters()" title="Clear all active filters (show everything)">✖ Clear</button>
         <button class="btn btn-ghost btn-sm" onclick="updateSelectedFilterGroup()" title="Overwrite this group with the current map filter">💾</button>
         <button class="btn btn-danger btn-sm" onclick="deleteSelectedFilterGroup()" title="Delete this group">✕</button>
       </div>
       ${selected ? `<div class="hint" style="margin-top:4px">${(selected.offTypes || []).length} type(s), ${(selected.excluded || []).length} location(s) hidden in this group.</div>` : ''}`
-    : '<div class="hint">No saved groups yet. Set what you want visible below, name it, and hit “Save current”.</div>';
+    : `<div class="row" style="gap:8px; align-items:center">
+        <span class="hint" style="flex:1">No saved groups yet. Set what you want visible below, name it, and hit “Save current”.</span>
+        <button class="btn btn-ghost btn-sm" onclick="fgClearAllFilters()" title="Clear all active filters (show everything)">✖ Clear filters</button>
+      </div>`;
 
   const types = sortedTypes(locationTypes.filter(t => (t.tabIds || ['default']).includes(activeMapTabId)));
   const treeHtml = types.length ? types.map(t => {
@@ -1791,6 +1795,20 @@ function fgSetAll(on) {
     types.forEach(t => filteredTypeIds.add(t._id));
   }
   saveFiltered(); saveHidden(); saveExcluded();
+  if (!fgOpen) fgRenderMapNow();
+  refreshFilterGroupsBody();
+}
+
+// Clear every active filter (all types shown, no location excludes, no
+// custom-field filters). Unhighlights the coverage-pane filter button right
+// away; the map redraws when the window closes.
+function fgClearAllFilters() {
+  filteredTypeIds = new Set();
+  hiddenTypeIds = new Set();
+  excludedLocIds = new Set();
+  propFilters = {};
+  saveFiltered(); saveHidden(); saveExcluded(); savePropFilters();
+  updateFilterButtonState();
   if (!fgOpen) fgRenderMapNow();
   refreshFilterGroupsBody();
 }
