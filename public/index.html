@@ -472,6 +472,7 @@
     .rv-loc-name { font-weight: 600; white-space: nowrap; }
     .rv-loc-addr { color: var(--text2); text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .rv-custom { margin-top: 10px; border-top: 1px dashed var(--border); padding-top: 10px; }
+    .rv-all-panel { border: 1px solid var(--accent); border-radius: var(--radius); padding: 10px; background: var(--surface2); margin-bottom: 10px; }
 
     /* ── COPY LOCATION ── */
     .copy-target-list { display: flex; flex-direction: column; gap: 4px; margin-top: 10px; max-height: 320px; overflow: auto; }
@@ -2470,8 +2471,29 @@ function batchReviewHtml() {
   }).join('');
   const mergeNote = existingCount
     ? ` <strong>${existingCount}</strong> already exist and will receive their locations;` : '';
+  const modifyAll = newCount > 1 ? `
+    <div class="row" style="align-items:flex-start; gap:8px">
+      <div class="batch-hint" style="flex:1">Found <strong>${batchReviewGroups.length}</strong> location type(s) and <strong>${totalLocs}</strong> location(s).${mergeNote} New types got a random color and default settings — adjust any of them, then create.</div>
+      <button class="btn btn-ghost btn-sm" id="rv-all-toggle" onclick="toggleReviewAllCustom()" style="white-space:nowrap">Modify All ▸</button>
+    </div>
+    <div class="rv-all-panel" id="rv-all-custom" style="display:none">
+      <div class="batch-hint">Applies border, pattern, opacity, and coverage settings to all ${newCount} new type(s) below. Each keeps its own randomly-assigned color unless you edit it individually.</div>
+      <div class="row" style="gap:8px; align-items:flex-end; margin-top:6px">
+        <div style="flex:1">
+          <label class="field-label">Default coverage</label>
+          <div class="row" style="gap:4px">
+            <input type="number" id="rv-all-radius" value="60" min="1" max="300" style="flex:1">
+            <select id="rv-all-unit" style="flex:1; padding:8px 6px;"><option value="minutes">min</option><option value="miles">mi</option></select>
+          </div>
+        </div>
+      </div>
+      <div class="section-divider" style="margin-top:10px">Bubble style</div>
+      <div class="style-controls boxed">${styleControlsHtml('rv-all', null)}</div>
+      <button type="button" class="btn btn-primary btn-sm" style="margin-top:10px" onclick="applyStyleToAllReviewCards()">Apply to all ${newCount} new type(s)</button>
+    </div>` : `
+    <div class="batch-hint">Found <strong>${batchReviewGroups.length}</strong> location type(s) and <strong>${totalLocs}</strong> location(s).${mergeNote} New types got a random color and default settings — adjust any of them, then create.</div>`;
   return `
-    <div class="batch-hint">Found <strong>${batchReviewGroups.length}</strong> location type(s) and <strong>${totalLocs}</strong> location(s).${mergeNote} New types got a random color and default settings — adjust any of them, then create.</div>
+    ${modifyAll}
     <div class="rv-cards">${cards}</div>
     <div class="section-divider" style="margin-top:14px">Show on map tabs <span class="hint">(applies to new types)</span></div>
     <div id="rv-tab-checkboxes"></div>
@@ -2488,6 +2510,40 @@ function toggleReviewDetails(i) {
   el.style.display = open ? 'block' : 'none';
   if (btn) btn.textContent = open ? 'Customize ▾' : 'Customize ▸';
   if (open) updateStylePreview('rv' + i);
+}
+
+function toggleReviewAllCustom() {
+  const el = document.getElementById('rv-all-custom');
+  const btn = document.getElementById('rv-all-toggle');
+  const open = el.style.display === 'none';
+  el.style.display = open ? 'block' : 'none';
+  if (btn) btn.textContent = open ? 'Modify All ▾' : 'Modify All ▸';
+  if (open) updateStylePreview('rv-all');
+}
+
+// Copy the border/pattern/coverage settings from the "Modify All" panel onto
+// every new-type card (skipping merges into existing types, which have no
+// controls of their own). Color is left alone on purpose — each card keeps
+// its own randomly-assigned color unless edited individually.
+function applyStyleToAllReviewCards() {
+  const radius = document.getElementById('rv-all-radius').value;
+  const unit = document.getElementById('rv-all-unit').value;
+  const s = readStyleInputs('rv-all');
+  batchReviewGroups.forEach((g, i) => {
+    if (g.existingId) return;
+    const radiusEl = document.getElementById(`rv${i}-radius`); if (radiusEl) radiusEl.value = radius;
+    const unitEl = document.getElementById(`rv${i}-unit`); if (unitEl) unitEl.value = unit;
+    document.getElementById(`rv${i}-lw`).value = s.lineWeight;
+    document.getElementById(`rv${i}-ls`).value = s.lineStyle;
+    document.getElementById(`rv${i}-lo`).value = s.lineOpacity;
+    document.getElementById(`rv${i}-fp`).value = s.fillPattern;
+    document.getElementById(`rv${i}-fo`).value = s.fillOpacity;
+    const custom = document.getElementById(`rv${i}-custom`);
+    const toggle = document.getElementById(`rv${i}-toggle`);
+    if (custom) custom.style.display = 'block';
+    if (toggle) toggle.textContent = 'Customize ▾';
+    updateStylePreview('rv' + i);
+  });
 }
 
 async function createTypesFromReview() {
