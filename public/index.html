@@ -8,6 +8,7 @@
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script src="https://unpkg.com/@turf/turf@6/turf.min.js"></script>
   <script src="https://unpkg.com/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <script src="https://unpkg.com/h3-js@4/dist/h3-js.umd.js"></script>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     :root {
@@ -228,6 +229,22 @@
     .combined-settings { margin-top: 8px; padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface2); }
     .combined-settings input[type=range] { accent-color: var(--accent); }
     .combined-settings .val-badge { font-weight: 700; color: var(--text); }
+    .section-divider .gear-btn.bidcov-gear { float: right; margin-top: -3px; }
+    .bidcov-status-row { display: flex; align-items: center; }
+    .depth-div-row { display: flex; align-items: center; gap: 8px; font-size: 0.8rem; }
+    .depth-div-row input[type=checkbox] { accent-color: var(--accent); flex-shrink: 0; }
+    .depth-div-row .depth-div-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .depth-div-row .depth-target-input { width: 44px; background: var(--surface2); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-size: 0.75rem; padding: 2px 4px; }
+    .depth-legend-swatches { display: flex; align-items: center; gap: 4px; margin-top: 4px; }
+    .depth-legend-swatches span { display: inline-block; width: 14px; height: 10px; border-radius: 2px; }
+    .link-review-row { display: flex; align-items: center; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--border); }
+    .link-review-row:last-child { border-bottom: none; }
+    .link-review-name { flex: 0 0 34%; font-size: 0.82rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .link-review-count { flex-shrink: 0; font-size: 0.7rem; color: var(--text2); }
+    .link-review-picker { flex: 1; min-width: 0; }
+    .link-review-picker input { width: 100%; margin-bottom: 3px; }
+    .link-review-picker select { width: 100%; }
+    .link-review-actions { flex-shrink: 0; display: flex; gap: 4px; }
     .legend-type { display: flex; flex-direction: column; }
     .legend-name { flex: 1; }
     .legend-filter-btn { background: none; border: none; color: var(--text2); cursor: pointer; padding: 2px 4px; border-radius: 4px; display: inline-flex; align-items: center; gap: 2px; }
@@ -704,6 +721,31 @@
       <div class="measure-readout" id="measure-readout">Click Measure, then click two or more points on the map.</div>
       <button class="measure-clear" id="measure-clear" onclick="clearMeasure()" style="display:none">Clear measurement</button>
     </div>
+
+    <div class="section-divider">Bid Coverage <button class="gear-btn bidcov-gear" title="Bid Database connection" onclick="openBidDbSettings()">⚙</button></div>
+    <div class="bidcov-status-row">
+      <span id="bidcov-badge" class="badge-ors fallback">⚪ No live data</span>
+    </div>
+    <div class="row" style="gap:6px; margin:6px 0;">
+      <button class="btn btn-ghost btn-sm" id="bidcov-sync-btn" onclick="runBidSync()" style="flex:1">🔄 Refresh Bid Data</button>
+      <button class="btn btn-ghost btn-sm" id="bidcov-review-btn" onclick="openLinkReview()" style="flex:1">📋 Review Links</button>
+    </div>
+    <div id="bidcov-sync-status" class="hint"></div>
+
+    <div class="section-divider">Coverage Depth</div>
+    <div id="depth-division-list" class="type-legend"><span class="hint">Sync bid data to see divisions</span></div>
+    <div class="row" style="gap:8px; align-items:center; margin-top:6px">
+      <label class="field-label" style="margin-bottom:0">Rule</label>
+      <select id="depth-rule" onchange="onDepthSettingsChanged()">
+        <option value="min" selected>Minimum (limiting division)</option>
+        <option value="average">Average</option>
+      </select>
+    </div>
+    <div class="row" style="gap:8px; align-items:center; margin-top:8px">
+      <input type="checkbox" id="depth-enabled" onchange="toggleDepthLayer()">
+      <label for="depth-enabled" style="cursor:pointer; font-size:0.8rem;">Show coverage-depth layer</label>
+    </div>
+    <div id="depth-legend" class="hint" style="margin-top:4px"></div>
   </div>
 </div>
 
@@ -751,7 +793,7 @@
 // ══════════════════════════════════
 // STATE
 // ══════════════════════════════════
-let map, coverageLayer, pinLayer, projectPinLayer, projectBubbleLayer, highlightLayer, selectionLayer, measureLayer;
+let map, coverageLayer, depthLayer, pinLayer, projectPinLayer, projectBubbleLayer, highlightLayer, selectionLayer, measureLayer;
 // Guards hover-highlight draws: an async polygon fetch is discarded if the
 // pointer has since left the row (or moved to another one).
 let highlightToken = 0;
@@ -841,6 +883,7 @@ async function init() {
   const cfg = await fetch('/api/config').then(r => r.json());
   hasOrsKey = cfg.hasOrsKey;
   await refreshOrsStatus();
+  await refreshBidCovStatus();
 
   // Apply splash color theme as CSS variables on the splash element
   if (cfg.splashColor) {
@@ -965,6 +1008,7 @@ function initMap() {
   }).addTo(map);
 
   coverageLayer = L.layerGroup().addTo(map);
+  depthLayer = L.layerGroup().addTo(map);
   projectBubbleLayer = L.layerGroup().addTo(map);
   pinLayer = L.layerGroup().addTo(map);
   projectPinLayer = L.layerGroup().addTo(map);
@@ -1289,6 +1333,310 @@ async function saveOrsSettings() {
   // be preserved; only new/missing isochrones will use the updated source.
   await refreshOrsStatus();
   renderTypeList();             // refresh "approx beyond N min" labels
+}
+
+// ══════════════════════════════════
+// BID COVERAGE ANALYTICS (Phase 2)
+// ══════════════════════════════════
+let bidDbSettings = null;
+let coverageConfig = null;       // { config, source, generatedAt }
+let depthSelected = new Set();   // division codes currently checked
+let depthTargets = {};           // division -> target bidder count (editable)
+let depthRule = 'min';
+let depthEnabled = false;
+let depthData = null;            // last /api/coverage-depth response
+
+async function refreshBidCovStatus() {
+  try { bidDbSettings = await fetch('/api/bid-db-settings').then(r => r.json()); } catch (e) { bidDbSettings = null; }
+  try { coverageConfig = await fetch('/api/coverage-config').then(r => r.json()); } catch (e) { coverageConfig = null; }
+  updateBidCovBadge();
+  await refreshLinkReviewCount();
+  renderDepthDivisionList();
+}
+
+function updateBidCovBadge() {
+  const badge = document.getElementById('bidcov-badge');
+  if (!badge) return;
+  if (!coverageConfig) { badge.textContent = '⚪ No config'; badge.className = 'badge-ors fallback'; return; }
+  const date = coverageConfig.generatedAt ? new Date(coverageConfig.generatedAt).toLocaleDateString() : '—';
+  if (coverageConfig.source === 'cached') { badge.textContent = `🟢 Live-derived (${date})`; badge.className = 'badge-ors active'; }
+  else { badge.textContent = `⚪ Bundled default (${date})`; badge.className = 'badge-ors fallback'; }
+}
+
+function openBidDbSettings() {
+  const s = bidDbSettings || { baseUrl: '', lastSyncAt: null, lastSyncMessage: '' };
+  const lastSync = s.lastSyncAt ? new Date(s.lastSyncAt).toLocaleString() : 'never';
+  openModal('⚙ Bid Database Connection', `
+    <div class="hint" style="margin-bottom:14px">Point Territory at your Bid Database app's <code>/api/bid-observations</code> endpoint.</div>
+    <label class="field-label">Bid Database URL</label>
+    <input type="text" id="biddb-url" placeholder="http://192.168.1.50:3020" value="${escapeHtml(s.baseUrl || '')}" style="width:100%">
+    <div class="hint" style="margin-top:8px">Last sync: ${lastSync}${s.lastSyncMessage ? ' — ' + escapeHtml(s.lastSyncMessage) : ''}</div>
+    <div style="margin-top:18px; display:flex; gap:8px; justify-content:flex-end">
+      <button class="btn btn-ghost" type="button" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-success" type="button" onclick="saveBidDbSettings()">Save</button>
+    </div>
+  `);
+}
+
+async function saveBidDbSettings() {
+  const baseUrl = document.getElementById('biddb-url')?.value || '';
+  await fetch('/api/bid-db-settings', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ baseUrl })
+  });
+  closeModal();
+  await refreshBidCovStatus();
+}
+
+async function runBidSync() {
+  const btn = document.getElementById('bidcov-sync-btn');
+  const status = document.getElementById('bidcov-sync-status');
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Syncing…'; }
+  if (status) { status.textContent = 'Fetching bid observations…'; status.style.color = 'var(--text2)'; }
+  try {
+    const r = await fetch('/api/bid-sync', { method: 'POST' }).then(r => r.json());
+    if (status) {
+      if (r.ok) { status.textContent = `🟢 Synced ${r.observationCount} observations, ${r.bidderCount} bidders (${r.needsReview} need review).`; status.style.color = 'var(--success)'; }
+      else { status.textContent = `🔴 ${r.error || 'Sync failed'}`; status.style.color = 'var(--danger)'; }
+    }
+  } catch (e) {
+    if (status) { status.textContent = `🔴 Sync failed: ${e.message}`; status.style.color = 'var(--danger)'; }
+  }
+  if (btn) { btn.disabled = false; btn.textContent = '🔄 Refresh Bid Data'; }
+  await refreshBidCovStatus();
+  if (depthEnabled) await renderDepthLayer(true);
+}
+
+async function refreshLinkReviewCount() {
+  try {
+    const list = await fetch('/api/bidder-links').then(r => r.json());
+    const btn = document.getElementById('bidcov-review-btn');
+    if (btn) btn.textContent = list.length ? `📋 Review Links (${list.length})` : '📋 Review Links';
+  } catch (e) { /* leave label as-is */ }
+}
+
+// ── Link-review panel ────────────────────────────────────────────
+function locationOptionsFor(divisions) {
+  const matchTypeIds = new Set();
+  if (divisions && divisions.length) {
+    for (const t of locationTypes) {
+      const m = t.name && String(t.name).trim().match(/^(\d{2})/);
+      if (m && divisions.includes(m[1])) matchTypeIds.add(t._id);
+    }
+  }
+  const preferredList = locations.filter(l => matchTypeIds.has(l.typeId));
+  const restList = locations.filter(l => !matchTypeIds.has(l.typeId));
+  const opt = l => `<option value="${l._id}">${escapeHtml(l.name)}</option>`;
+  let html = '<option value="">— choose a location —</option>';
+  if (preferredList.length) html += `<optgroup label="Matching type">${preferredList.map(opt).join('')}</optgroup>`;
+  html += `<optgroup label="All locations">${restList.map(opt).join('')}</optgroup>`;
+  return html;
+}
+
+function linkReviewHtml(list) {
+  if (!list.length) return '<div class="hint">Nothing to review — every bidder is linked.</div>';
+  return list.map(b => `
+    <div class="link-review-row" data-bidder="${escapeHtml(b.bidderName)}">
+      <div class="link-review-name" title="${escapeHtml(b.bidderName)}">${escapeHtml(b.bidderName)}</div>
+      <div class="link-review-count">${b.bidCount} bid${b.bidCount !== 1 ? 's' : ''}${b.method === 'fuzzy' ? ' · fuzzy' : ''}</div>
+      <div class="link-review-picker">
+        <input type="text" placeholder="Filter locations…" oninput="filterLinkReviewOptions(this)">
+        <select>${locationOptionsFor(b.divisions)}</select>
+      </div>
+      <div class="link-review-actions">
+        <button class="btn btn-ghost btn-sm" title="Confirm this location" onclick="confirmBidderLink(this)">✓</button>
+        <button class="btn btn-ghost btn-sm" title="No location for this bidder" onclick="skipBidderLink(this)">Skip</button>
+      </div>
+    </div>
+  `).join('');
+}
+
+async function openLinkReview() {
+  const list = await fetch('/api/bidder-links').then(r => r.json());
+  openModal('📋 Review Bidder Links', linkReviewHtml(list), { wide: true });
+}
+
+function filterLinkReviewOptions(input) {
+  const select = input.nextElementSibling;
+  const q = input.value.trim().toLowerCase();
+  for (const opt of select.querySelectorAll('option')) {
+    if (!opt.value) continue;
+    opt.style.display = !q || opt.textContent.toLowerCase().includes(q) ? '' : 'none';
+  }
+}
+
+async function confirmBidderLink(btn) {
+  const row = btn.closest('.link-review-row');
+  const bidderName = row.dataset.bidder;
+  const locationId = row.querySelector('select').value;
+  if (!locationId) { row.querySelector('select').focus(); return; }
+  await fetch(`/api/bidder-links/${encodeURIComponent(bidderName)}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ locationId })
+  });
+  row.remove();
+  await refreshLinkReviewCount();
+}
+
+async function skipBidderLink(btn) {
+  const row = btn.closest('.link-review-row');
+  const bidderName = row.dataset.bidder;
+  await fetch(`/api/bidder-links/${encodeURIComponent(bidderName)}/skip`, { method: 'POST' });
+  row.remove();
+  await refreshLinkReviewCount();
+}
+
+// ── Coverage-depth layer ─────────────────────────────────────────
+function renderDepthDivisionList() {
+  const host = document.getElementById('depth-division-list');
+  if (!host) return;
+  const divs = coverageConfig && coverageConfig.config && coverageConfig.config.divisions;
+  if (!divs) { host.innerHTML = '<span class="hint">Sync bid data to see divisions</span>'; return; }
+  const codes = Object.keys(divs).filter(code => !divs[code].always_covered).sort();
+  if (!codes.length) { host.innerHTML = '<span class="hint">No mappable divisions (all are distance-blind)</span>'; return; }
+  host.innerHTML = codes.map(code => {
+    const d = divs[code];
+    if (depthTargets[code] == null) depthTargets[code] = d.target_bidders || 3;
+    const checked = depthSelected.has(code) ? 'checked' : '';
+    return `
+      <div class="depth-div-row">
+        <input type="checkbox" data-division="${code}" ${checked} onchange="onDepthDivisionToggled(this)">
+        <span class="depth-div-name" title="${escapeHtml(d.name)}">${code} ${escapeHtml(d.name)}</span>
+        <input type="number" class="depth-target-input" min="1" max="10" value="${depthTargets[code]}" onchange="onDepthTargetChanged('${code}', this.value)">
+      </div>`;
+  }).join('');
+}
+
+function onDepthDivisionToggled(cb) {
+  const code = cb.dataset.division;
+  if (cb.checked) depthSelected.add(code); else depthSelected.delete(code);
+  onDepthSettingsChanged(true);
+}
+function onDepthTargetChanged(code, value) {
+  const n = parseInt(value, 10);
+  depthTargets[code] = Number.isFinite(n) && n > 0 ? n : 1;
+  onDepthSettingsChanged(false);
+}
+function onDepthSettingsChanged(refetch) {
+  depthRule = document.getElementById('depth-rule')?.value || 'min';
+  if (depthEnabled) renderDepthLayer(!!refetch);
+}
+
+async function toggleDepthLayer() {
+  depthEnabled = document.getElementById('depth-enabled')?.checked || false;
+  if (depthEnabled) {
+    if (!depthSelected.size && coverageConfig && coverageConfig.config) {
+      Object.keys(coverageConfig.config.divisions).forEach(code => {
+        if (!coverageConfig.config.divisions[code].always_covered) depthSelected.add(code);
+      });
+      renderDepthDivisionList();
+    }
+    await renderDepthLayer(true);
+  } else {
+    depthLayer.clearLayers();
+    const legend = document.getElementById('depth-legend');
+    if (legend) legend.innerHTML = '';
+  }
+}
+
+async function renderDepthLayer(forceFetch) {
+  depthLayer.clearLayers();
+  if (!depthEnabled || !depthSelected.size) return;
+  const divisions = [...depthSelected];
+  const divKey = divisions.join(',');
+  if (forceFetch || !depthData || depthData._divKey !== divKey) {
+    try {
+      const resp = await fetch(`/api/coverage-depth?divisions=${divisions.join(',')}&resolution=7`).then(r => r.json());
+      resp._divKey = divKey;
+      depthData = resp;
+    } catch (e) {
+      const legend = document.getElementById('depth-legend');
+      if (legend) legend.innerHTML = `<span style="color:var(--danger)">Depth fetch failed: ${escapeHtml(e.message)}</span>`;
+      return;
+    }
+  }
+  drawDepthCells(divisions);
+}
+
+function depthCompositeAt(cellId, divisions) {
+  const values = divisions.map(code => {
+    const d = depthData.divisions[code];
+    const cell = d && d.cells && d.cells[cellId];
+    const depth = cell ? cell.depth : 0;
+    const target = depthTargets[code] || 1;
+    return depth / target;
+  });
+  return depthRule === 'average' ? values.reduce((a, b) => a + b, 0) / values.length : Math.min(...values);
+}
+
+function depthCellColor(ratio) {
+  const r = Math.max(0, Math.min(1.3, ratio));
+  if (r < 1) return `hsl(${Math.round(r * 55)}, 75%, 50%)`; // red -> amber approaching target
+  return 'hsl(140, 55%, 40%)'; // green at/above target
+}
+
+function drawDepthCells(divisions) {
+  if (!depthData) return;
+  const cellIds = new Set();
+  for (const code of divisions) {
+    const d = depthData.divisions[code];
+    if (d && d.cells) Object.keys(d.cells).forEach(id => cellIds.add(id));
+  }
+  for (const id of cellIds) {
+    const composite = depthCompositeAt(id, divisions);
+    const boundary = h3.cellToBoundary(id);
+    const poly = L.polygon(boundary, {
+      color: depthCellColor(composite), weight: 1, opacity: 0.5,
+      fillColor: depthCellColor(composite), fillOpacity: 0.45
+    }).addTo(depthLayer);
+    poly.on('click', () => showDepthCellPopup(poly, id, divisions));
+  }
+  renderDepthLegend();
+  drawDepthContour(cellIds, divisions);
+}
+
+function renderDepthLegend() {
+  const host = document.getElementById('depth-legend');
+  if (!host) return;
+  host.innerHTML = `<div class="depth-legend-swatches">
+      <span style="background:${depthCellColor(0)}"></span><span style="background:${depthCellColor(0.5)}"></span><span style="background:${depthCellColor(1)}"></span>
+      <span style="margin-left:4px">under-covered → at target</span>
+    </div>`;
+}
+
+function showDepthCellPopup(poly, cellId, divisions) {
+  const lines = divisions.map(code => {
+    const d = depthData.divisions[code];
+    const cell = d && d.cells && d.cells[cellId];
+    const name = (coverageConfig.config.divisions[code] || {}).name || code;
+    if (!cell) return `<div><b>${escapeHtml(name)}</b>: no data</div>`;
+    const contributors = (cell.contributors || []).map(c => `${escapeHtml(c.name)} (${c.weight})`).join(', ') || 'none';
+    return `<div style="margin-bottom:4px"><b>${escapeHtml(name)}</b>: depth ${cell.depth}${cell.secondaryDepth ? ` (+${cell.secondaryDepth} support-only)` : ''}<br><span class="hint">${contributors}</span></div>`;
+  }).join('');
+  poly.bindPopup(`<div style="max-width:240px">${lines}</div>`).openPopup();
+}
+
+// Contour at the depth==target boundary — "a project inside this line can
+// expect a competitive bid event." Best-effort: any turf failure just skips
+// the line, the choropleth itself is the primary layer.
+function drawDepthContour(cellIds, divisions) {
+  if (cellIds.size < 4 || typeof turf.isolines !== 'function') return;
+  try {
+    const points = [];
+    for (const id of cellIds) {
+      const [lat, lng] = h3.cellToLatLng(id);
+      points.push(turf.point([lng, lat], { depth: depthCompositeAt(id, divisions) }));
+    }
+    const fc = turf.featureCollection(points);
+    const interpolated = turf.interpolate(fc, 3, { gridType: 'points', property: 'depth', units: 'kilometers' });
+    // turf.isolines treats the first break as a reference floor and only
+    // emits a line for subsequent breaks, so the real threshold (1.0) must
+    // be second, preceded by a value below the grid's minimum.
+    const minVal = Math.min(...interpolated.features.map(f => f.properties.depth), 1) - 1;
+    const lines = turf.isolines(interpolated, [minVal, 1.0], { zProperty: 'depth' });
+    const target = lines && lines.features ? lines.features.filter(f => f.properties.depth === 1.0) : [];
+    if (target.length) {
+      L.geoJSON(turf.featureCollection(target), { style: { color: '#ffffff', weight: 2.5, dashArray: '5,4', fillOpacity: 0 } }).addTo(depthLayer);
+    }
+  } catch (e) { /* contour is a nice-to-have; the choropleth still renders */ }
 }
 
 // ══════════════════════════════════

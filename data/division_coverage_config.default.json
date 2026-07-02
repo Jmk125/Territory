@@ -1,0 +1,557 @@
+{
+  "meta": {
+    "generated": "2026-07-02",
+    "source": "CMR bid database (20 projects, 2020-2026, 1,776 bids) joined to geocoded contact export (195/245 active bidders located, 95% bid coverage)",
+    "method": "Per-bid deviation from package median, packages with >=3 bids only. Distance = straight-line miles, bidder office to project zip centroid. UPGRADE PATH: replace with ORS drive-time matrix and exact project geocodes.",
+    "distance_basis": "straight_line_miles",
+    "interpretation": "competitive_radius_mi = distance within which the trade historically bids at/below package median. outer_radius_mi = distance beyond which bids are unreliable insurance numbers. Weights feed coverage-depth counting: depth(cell, division) = sum over located bidders of weight(distance) * bidder multiplier.",
+    "coverage_rule": "A cell is covered for a division when weighted depth >= target_bidders. Project-viability boundary = cells covered for ALL user-selected divisions (minimum rule, not average)."
+  },
+  "defaults": {
+    "tier": "regional",
+    "competitive_radius_mi": 30,
+    "outer_radius_mi": 60,
+    "weights": {
+      "inside_competitive": 1.0,
+      "competitive_to_outer": 0.7,
+      "beyond_outer": 0.0
+    },
+    "target_bidders": 3
+  },
+  "divisions": {
+    "03": {
+      "name": "Concrete",
+      "tier": "local",
+      "target_bidders": 3,
+      "evidence": {
+        "usable_bids": 84,
+        "median_dev_pct_by_band": {
+          "0_15mi": -8.8,
+          "15_30mi": 4.2,
+          "30_50mi": 0.0,
+          "50plus_mi": 0.0
+        },
+        "band_sample_sizes": {
+          "0_15mi": 12,
+          "15_30mi": 26,
+          "30_50mi": 33,
+          "50plus_mi": 13
+        },
+        "share_of_bids_from_50plus_mi": 0.15
+      },
+      "competitive_radius_mi": 20,
+      "outer_radius_mi": 50,
+      "weights": {
+        "inside_competitive": 1.0,
+        "competitive_to_outer": 0.4,
+        "beyond_outer": 0.0
+      }
+    },
+    "04": {
+      "name": "Masonry",
+      "tier": "local",
+      "target_bidders": 2,
+      "evidence": {
+        "usable_bids": 52,
+        "median_dev_pct_by_band": {
+          "0_15mi": -5.8,
+          "15_30mi": 1.7,
+          "30_50mi": 2.2,
+          "50plus_mi": 3.8
+        },
+        "band_sample_sizes": {
+          "0_15mi": 14,
+          "15_30mi": 6,
+          "30_50mi": 21,
+          "50plus_mi": 11
+        },
+        "share_of_bids_from_50plus_mi": 0.21
+      },
+      "competitive_radius_mi": 20,
+      "outer_radius_mi": 55,
+      "weights": {
+        "inside_competitive": 1.0,
+        "competitive_to_outer": 0.4,
+        "beyond_outer": 0.0
+      }
+    },
+    "05": {
+      "name": "Metals / Steel",
+      "tier": "local",
+      "target_bidders": 3,
+      "evidence": {
+        "usable_bids": 80,
+        "median_dev_pct_by_band": {
+          "0_15mi": -8.5,
+          "15_30mi": 0.8,
+          "30_50mi": 0.0,
+          "50plus_mi": -0.1
+        },
+        "band_sample_sizes": {
+          "0_15mi": 6,
+          "15_30mi": 20,
+          "30_50mi": 26,
+          "50plus_mi": 28
+        },
+        "share_of_bids_from_50plus_mi": 0.35
+      },
+      "competitive_radius_mi": 20,
+      "outer_radius_mi": 70,
+      "weights": {
+        "inside_competitive": 1.0,
+        "competitive_to_outer": 0.75,
+        "beyond_outer": 0.0
+      }
+    },
+    "23": {
+      "name": "HVAC",
+      "tier": "local",
+      "target_bidders": 3,
+      "evidence": {
+        "usable_bids": 169,
+        "median_dev_pct_by_band": {
+          "0_15mi": -3.8,
+          "15_30mi": 0.0,
+          "30_50mi": 0.0,
+          "50plus_mi": 3.4
+        },
+        "band_sample_sizes": {
+          "0_15mi": 31,
+          "15_30mi": 57,
+          "30_50mi": 60,
+          "50plus_mi": 21
+        },
+        "share_of_bids_from_50plus_mi": 0.12
+      },
+      "competitive_radius_mi": 20,
+      "outer_radius_mi": 55,
+      "weights": {
+        "inside_competitive": 1.0,
+        "competitive_to_outer": 0.6,
+        "beyond_outer": 0.0
+      }
+    },
+    "31": {
+      "name": "Earthwork",
+      "tier": "local",
+      "target_bidders": 3,
+      "evidence": {
+        "usable_bids": 112,
+        "median_dev_pct_by_band": {
+          "0_15mi": -3.7,
+          "15_30mi": -1.1,
+          "30_50mi": 0.0,
+          "50plus_mi": 6.9
+        },
+        "band_sample_sizes": {
+          "0_15mi": 23,
+          "15_30mi": 38,
+          "30_50mi": 41,
+          "50plus_mi": 10
+        },
+        "share_of_bids_from_50plus_mi": 0.09
+      },
+      "competitive_radius_mi": 20,
+      "outer_radius_mi": 45,
+      "weights": {
+        "inside_competitive": 1.0,
+        "competitive_to_outer": 0.3,
+        "beyond_outer": 0.0
+      }
+    },
+    "08": {
+      "name": "Openings",
+      "tier": "regional",
+      "target_bidders": 3,
+      "evidence": {
+        "usable_bids": 73,
+        "median_dev_pct_by_band": {
+          "0_15mi": -2.9,
+          "15_30mi": -0.4,
+          "30_50mi": 0.8,
+          "50plus_mi": 0.0
+        },
+        "band_sample_sizes": {
+          "0_15mi": 3,
+          "15_30mi": 9,
+          "30_50mi": 34,
+          "50plus_mi": 27
+        },
+        "share_of_bids_from_50plus_mi": 0.37
+      },
+      "competitive_radius_mi": 25,
+      "outer_radius_mi": 60,
+      "weights": {
+        "inside_competitive": 1.0,
+        "competitive_to_outer": 0.7,
+        "beyond_outer": 0.0
+      }
+    },
+    "09": {
+      "name": "Finishes",
+      "tier": "regional",
+      "target_bidders": 3,
+      "evidence": {
+        "usable_bids": 115,
+        "median_dev_pct_by_band": {
+          "0_15mi": -1.9,
+          "15_30mi": 0.0,
+          "30_50mi": 0.0,
+          "50plus_mi": 3.5
+        },
+        "band_sample_sizes": {
+          "0_15mi": 17,
+          "15_30mi": 32,
+          "30_50mi": 39,
+          "50plus_mi": 27
+        },
+        "share_of_bids_from_50plus_mi": 0.23
+      },
+      "competitive_radius_mi": 25,
+      "outer_radius_mi": 60,
+      "weights": {
+        "inside_competitive": 1.0,
+        "competitive_to_outer": 0.7,
+        "beyond_outer": 0.0
+      }
+    },
+    "28": {
+      "name": "Electronic Safety & Security",
+      "tier": "regional",
+      "target_bidders": 3,
+      "evidence": {
+        "usable_bids": 55,
+        "median_dev_pct_by_band": {
+          "0_15mi": -3.9,
+          "15_30mi": 0.0,
+          "30_50mi": 3.6,
+          "50plus_mi": 0.1
+        },
+        "band_sample_sizes": {
+          "0_15mi": 14,
+          "15_30mi": 15,
+          "30_50mi": 16,
+          "50plus_mi": 10
+        },
+        "share_of_bids_from_50plus_mi": 0.18
+      },
+      "competitive_radius_mi": 25,
+      "outer_radius_mi": 55,
+      "weights": {
+        "inside_competitive": 1.0,
+        "competitive_to_outer": 0.6,
+        "beyond_outer": 0.0
+      }
+    },
+    "07": {
+      "name": "Thermal & Moisture / Roofing",
+      "tier": "regional",
+      "target_bidders": 3,
+      "evidence": {
+        "usable_bids": 45,
+        "median_dev_pct_by_band": {
+          "0_15mi": -0.8,
+          "15_30mi": 1.6,
+          "30_50mi": 0.8,
+          "50plus_mi": 0.0
+        },
+        "band_sample_sizes": {
+          "0_15mi": 10,
+          "15_30mi": 16,
+          "30_50mi": 14,
+          "50plus_mi": 5
+        },
+        "share_of_bids_from_50plus_mi": 0.11
+      },
+      "competitive_radius_mi": 30,
+      "outer_radius_mi": 60,
+      "weights": {
+        "inside_competitive": 1.0,
+        "competitive_to_outer": 0.8,
+        "beyond_outer": 0.0
+      }
+    },
+    "27": {
+      "name": "Communications",
+      "tier": "regional",
+      "target_bidders": 3,
+      "evidence": {
+        "usable_bids": 195,
+        "median_dev_pct_by_band": {
+          "0_15mi": -0.2,
+          "15_30mi": 0.0,
+          "30_50mi": 2.2,
+          "50plus_mi": 0.0
+        },
+        "band_sample_sizes": {
+          "0_15mi": 44,
+          "15_30mi": 49,
+          "30_50mi": 56,
+          "50plus_mi": 46
+        },
+        "share_of_bids_from_50plus_mi": 0.24
+      },
+      "competitive_radius_mi": 35,
+      "outer_radius_mi": 70,
+      "weights": {
+        "inside_competitive": 1.0,
+        "competitive_to_outer": 0.8,
+        "beyond_outer": 0.0
+      }
+    },
+    "32": {
+      "name": "Exterior Improvements",
+      "tier": "regional",
+      "target_bidders": 3,
+      "evidence": {
+        "usable_bids": 55,
+        "median_dev_pct_by_band": {
+          "0_15mi": 0.0,
+          "15_30mi": -0.2,
+          "30_50mi": 0.0,
+          "50plus_mi": null
+        },
+        "band_sample_sizes": {
+          "0_15mi": 9,
+          "15_30mi": 25,
+          "30_50mi": 21,
+          "50plus_mi": 0
+        },
+        "share_of_bids_from_50plus_mi": 0.0
+      },
+      "competitive_radius_mi": 30,
+      "outer_radius_mi": 60,
+      "weights": {
+        "inside_competitive": 1.0,
+        "competitive_to_outer": 0.8,
+        "beyond_outer": 0.0
+      }
+    },
+    "26": {
+      "name": "Electrical",
+      "tier": "regional",
+      "target_bidders": 3,
+      "evidence": {
+        "usable_bids": 58,
+        "median_dev_pct_by_band": {
+          "0_15mi": 0.0,
+          "15_30mi": 2.0,
+          "30_50mi": 0.0,
+          "50plus_mi": 3.3
+        },
+        "band_sample_sizes": {
+          "0_15mi": 24,
+          "15_30mi": 12,
+          "30_50mi": 10,
+          "50plus_mi": 12
+        },
+        "share_of_bids_from_50plus_mi": 0.21
+      },
+      "competitive_radius_mi": 35,
+      "outer_radius_mi": 70,
+      "weights": {
+        "inside_competitive": 1.0,
+        "competitive_to_outer": 0.85,
+        "beyond_outer": 0.0
+      }
+    },
+    "22": {
+      "name": "Plumbing",
+      "tier": "regional",
+      "target_bidders": 3,
+      "evidence": {
+        "usable_bids": 83,
+        "median_dev_pct_by_band": {
+          "0_15mi": 0.0,
+          "15_30mi": 0.0,
+          "30_50mi": 0.0,
+          "50plus_mi": 3.8
+        },
+        "band_sample_sizes": {
+          "0_15mi": 32,
+          "15_30mi": 21,
+          "30_50mi": 21,
+          "50plus_mi": 9
+        },
+        "share_of_bids_from_50plus_mi": 0.11
+      },
+      "competitive_radius_mi": 40,
+      "outer_radius_mi": 70,
+      "weights": {
+        "inside_competitive": 1.0,
+        "competitive_to_outer": 0.9,
+        "beyond_outer": 0.0
+      }
+    },
+    "21": {
+      "name": "Fire Suppression",
+      "tier": "regional",
+      "target_bidders": 3,
+      "evidence": {
+        "usable_bids": 60,
+        "median_dev_pct_by_band": {
+          "0_15mi": 5.4,
+          "15_30mi": 0.0,
+          "30_50mi": -1.1,
+          "50plus_mi": -1.6
+        },
+        "band_sample_sizes": {
+          "0_15mi": 11,
+          "15_30mi": 14,
+          "30_50mi": 28,
+          "50plus_mi": 7
+        },
+        "share_of_bids_from_50plus_mi": 0.12
+      },
+      "competitive_radius_mi": 40,
+      "outer_radius_mi": 70,
+      "weights": {
+        "inside_competitive": 1.0,
+        "competitive_to_outer": 0.9,
+        "beyond_outer": 0.0
+      }
+    },
+    "11": {
+      "name": "Equipment",
+      "tier": "distance_blind",
+      "target_bidders": 3,
+      "evidence": {
+        "usable_bids": 107,
+        "median_dev_pct_by_band": {
+          "0_15mi": null,
+          "15_30mi": 0.2,
+          "30_50mi": -5.1,
+          "50plus_mi": 0.0
+        },
+        "band_sample_sizes": {
+          "0_15mi": 2,
+          "15_30mi": 9,
+          "30_50mi": 6,
+          "50plus_mi": 90
+        },
+        "share_of_bids_from_50plus_mi": 0.84
+      },
+      "always_covered": true,
+      "note": "Vendor/national trade: no distance-price relationship in bid history. Exclude from coverage-depth mapping; assume target bidders achievable anywhere in market."
+    },
+    "12": {
+      "name": "Furnishings",
+      "tier": "distance_blind",
+      "target_bidders": 2,
+      "evidence": {
+        "usable_bids": 15,
+        "median_dev_pct_by_band": {
+          "0_15mi": null,
+          "15_30mi": -14.6,
+          "30_50mi": 0.0,
+          "50plus_mi": 9.1
+        },
+        "band_sample_sizes": {
+          "0_15mi": 0,
+          "15_30mi": 4,
+          "30_50mi": 4,
+          "50plus_mi": 7
+        },
+        "share_of_bids_from_50plus_mi": 0.47
+      },
+      "always_covered": true,
+      "note": "Vendor/national trade: no distance-price relationship in bid history. Exclude from coverage-depth mapping; assume target bidders achievable anywhere in market."
+    },
+    "14": {
+      "name": "Conveying / Elevators",
+      "tier": "distance_blind",
+      "target_bidders": 2,
+      "evidence": {
+        "usable_bids": 23,
+        "median_dev_pct_by_band": {
+          "0_15mi": null,
+          "15_30mi": -2.5,
+          "30_50mi": -3.6,
+          "50plus_mi": 1.8
+        },
+        "band_sample_sizes": {
+          "0_15mi": 2,
+          "15_30mi": 3,
+          "30_50mi": 4,
+          "50plus_mi": 14
+        },
+        "share_of_bids_from_50plus_mi": 0.61
+      },
+      "always_covered": true,
+      "note": "Vendor/national trade: no distance-price relationship in bid history. Exclude from coverage-depth mapping; assume target bidders achievable anywhere in market."
+    },
+    "06": {
+      "name": "Wood & Plastics / Carpentry",
+      "tier": "insufficient_data",
+      "target_bidders": 2,
+      "evidence": {
+        "usable_bids": 0,
+        "median_dev_pct_by_band": {
+          "0_15mi": null,
+          "15_30mi": null,
+          "30_50mi": null,
+          "50plus_mi": null
+        },
+        "band_sample_sizes": {
+          "0_15mi": 0,
+          "15_30mi": 0,
+          "30_50mi": 0,
+          "50plus_mi": 0
+        },
+        "share_of_bids_from_50plus_mi": 0
+      },
+      "competitive_radius_mi": 25,
+      "outer_radius_mi": 60,
+      "weights": {
+        "inside_competitive": 1.0,
+        "competitive_to_outer": 0.7,
+        "beyond_outer": 0.0
+      },
+      "note": "Not enough multi-bid packages to derive empirically. Values are regional-tier defaults; refresh after more bid events."
+    }
+  },
+  "bidder_overrides": {
+    "Lencyk Masonry": {
+      "division": "04",
+      "weight_multiplier": 0.5,
+      "ignore_distance_decay": true,
+      "note": "Appetite-driven, not distance-driven. Wins at -5 to -12% out to 72 mi when hungry; throws +28 to +47% insurance numbers at identical distances when full. Count as 0.5 reliable coverage everywhere in NE Ohio. Sole mason historically willing to bid Columbiana County."
+    },
+    "Valentine": {
+      "division": "04",
+      "competitive_radius_mi": 35,
+      "outer_radius_mi": 50,
+      "note": "Within +/-7% of median on every bid inside 35 mi of North Canton (n=9). Most reliable competitive mason in core Stark/Summit market."
+    },
+    "Foti Contracting": {
+      "division": "04",
+      "competitive_radius_mi": 15,
+      "outer_radius_mi": 55,
+      "note": "Sharp inside ~15 mi of Wickliffe (-10 to -12%, wins). Stays near median to ~50 mi but 0 wins south; median-supporting only at distance."
+    },
+    "LMR": {
+      "division": "04",
+      "median_support_only": true,
+      "note": "Always within +/-5% of median, 0 wins ever. Legitimizes the median but do not count toward expected-low-bid coverage."
+    },
+    "VMI Group": {
+      "division": "03",
+      "weight_multiplier": 0.2,
+      "note": "Bids +13% median even locally, 0 wins. Courtesy bidder; near-zero coverage value."
+    },
+    "Masterpiece Painting": {
+      "division": "09",
+      "weight_multiplier_beyond_competitive": 0.1,
+      "note": "Far bids run +44.8% vs median. Exclude from coverage beyond competitive radius."
+    },
+    "Platform Cement": {
+      "division": "31",
+      "note": "Strong local advantage: -13.8% median inside 25 mi."
+    },
+    "Livi Steel": {
+      "division": "05",
+      "competitive_radius_mi": 70,
+      "note": "Fab-shop economics: wins routinely at distance (8 wins beyond 25 mi, -2.7% median far)."
+    }
+  }
+}
