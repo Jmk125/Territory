@@ -2,4 +2,10 @@ node_modules/
 data/isochroneCache.db
 data/travelCache.db
 data/settings.db
+data/bidObservationsCache.db
+data/bidderLinks.db
+data/bidderOverrides.db
+data/coverageConfig.db
+data/coverageDepthCache.db
+data/projectLocations.db
 .env

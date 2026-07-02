@@ -3,6 +3,11 @@ const express = require('express');
 const Datastore = require('nedb');
 const fetch = require('node-fetch');
 const path = require('path');
+const fs = require('fs');
+const crypto = require('crypto');
+const entityResolution = require('./lib/entityResolution');
+const coverageDerivation = require('./lib/coverageDerivation');
+const coverageDepthLib = require('./lib/coverageDepth');
 
 const app = express();
 const PORT = Number.parseInt(process.env.PORT, 10) || 3080;
@@ -18,7 +23,23 @@ const db = {
   travelCache: new Datastore({ filename: path.join(__dirname, 'data/travelCache.db'), autoload: true }),
   // Runtime ORS settings chosen from the UI (which server to call, range limit).
   settings: new Datastore({ filename: path.join(__dirname, 'data/settings.db'), autoload: true }),
-  mapTabs: new Datastore({ filename: path.join(__dirname, 'data/mapTabs.db'), autoload: true })
+  mapTabs: new Datastore({ filename: path.join(__dirname, 'data/mapTabs.db'), autoload: true }),
+  // ── Bid-coverage analytics (Territory Phase 2) ──────────────────────
+  // bidderName -> Territory location link, produced by the entity-resolution
+  // cascade or confirmed/skipped by hand in the review panel.
+  bidderLinks: new Datastore({ filename: path.join(__dirname, 'data/bidderLinks.db'), autoload: true }),
+  // Geocoded project addresses, keyed by project name + address hash so a
+  // changed address naturally invalidates the cached coordinates.
+  projectLocations: new Datastore({ filename: path.join(__dirname, 'data/projectLocations.db'), autoload: true }),
+  // Raw observations fetched from the Bid Database (single "latest" doc).
+  // Territory never stores bid amounts beyond this fetched cache.
+  bidObservationsCache: new Datastore({ filename: path.join(__dirname, 'data/bidObservationsCache.db'), autoload: true }),
+  // Last-good derived coverage config (single "latest" doc).
+  coverageConfig: new Datastore({ filename: path.join(__dirname, 'data/coverageConfig.db'), autoload: true }),
+  // Manual per-bidder overrides; merged over auto-derived flags (manual wins).
+  bidderOverrides: new Datastore({ filename: path.join(__dirname, 'data/bidderOverrides.db'), autoload: true }),
+  // Precomputed H3 coverage-depth cells, cached per division+resolution.
+  coverageDepthCache: new Datastore({ filename: path.join(__dirname, 'data/coverageDepthCache.db'), autoload: true })
 };
 
 app.use(express.json({ limit: '50mb' }));
@@ -233,29 +254,30 @@ function parseLatLng(s) {
   return { lat, lng };
 }
 
-app.get('/api/geocode', async (req, res) => {
-  const { q } = req.query;
-  if (!q) return res.status(400).json({ error: 'query required' });
-
-  // Pasted coordinates resolve directly — skip the address lookup entirely.
+// Shared by the /api/geocode route and the project-address sync path (2b).
+// Pasted "lat, lng" pairs resolve directly; otherwise queries Nominatim,
+// preferring US results but broadening the search if that finds nothing.
+async function geocodeAddress(q) {
   const coords = parseLatLng(q);
   if (coords) {
-    return res.json([{ display_name: `📍 ${coords.lat.toFixed(6)}, ${coords.lng.toFixed(6)}`, lat: coords.lat, lng: coords.lng }]);
+    return [{ display_name: `📍 ${coords.lat.toFixed(6)}, ${coords.lng.toFixed(6)}`, lat: coords.lat, lng: coords.lng }];
   }
-
   const lookup = async (extra) => {
     const url = `https://nominatim.openstreetmap.org/search?format=json&addressdetails=1&dedupe=1&limit=8&q=${encodeURIComponent(q)}${extra}`;
     const r = await fetch(url, { headers: { 'User-Agent': 'ProjectSecretWishes/1.0' } });
     const data = await r.json();
     return Array.isArray(data) ? data : [];
   };
+  let data = await lookup('&countrycodes=us');
+  if (!data.length) data = await lookup('');
+  return data.map(d => ({ display_name: d.display_name, lat: parseFloat(d.lat), lng: parseFloat(d.lon) }));
+}
 
+app.get('/api/geocode', async (req, res) => {
+  const { q } = req.query;
+  if (!q) return res.status(400).json({ error: 'query required' });
   try {
-    // Prefer US results, but broaden the search if the restricted query finds
-    // nothing — many specific addresses only surface without the country filter.
-    let data = await lookup('&countrycodes=us');
-    if (!data.length) data = await lookup('');
-    res.json(data.map(d => ({ display_name: d.display_name, lat: parseFloat(d.lat), lng: parseFloat(d.lon) })));
+    res.json(await geocodeAddress(q));
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -650,6 +672,481 @@ function minutesToMeters(minutes) {
   return Math.round(minutes * 1340);
 }
 
+// ═════════════════════════════════════════════════════════════════
+// BID COVERAGE ANALYTICS (Territory Phase 2)
+// ═════════════════════════════════════════════════════════════════
+// Consumes GET /api/bid-observations from a separate Bid Database app
+// (location-free bid facts), links bidders to Territory's own location
+// records, geocodes project addresses, computes distances, and derives a
+// self-updating coverage config + H3 depth layer. Bid Database stays the
+// system of record for bid economics; Territory never stores bid amounts
+// beyond the fetched observations cache, and never sends coordinates back.
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+function sha1(s) { return crypto.createHash('sha1').update(String(s)).digest('hex').slice(0, 12); }
+
+// "04A Masonry" -> {division:'04', packageCode:'04A', tradeName:'Masonry'}
+// "22 - Plumbing" -> {division:'22', packageCode:'22', tradeName:'Plumbing'}
+function parseDivisionFromTypeName(name) {
+  const m = String(name || '').trim().match(/^(\d{2})([A-Za-z]?)\s*[-–:]?\s*(.*)$/);
+  if (!m) return null;
+  return { division: m[1], packageCode: m[1] + (m[2] || ''), tradeName: m[3].trim() };
+}
+
+// ─── Bid Database connection settings ───────────────────────────────
+const BIDDB_SETTINGS_KEY = 'bidDb';
+const BID_SYNC_STALE_MS = 24 * 60 * 60 * 1000;
+
+function getBidDbSettings() {
+  return new Promise(resolve => db.settings.findOne({ key: BIDDB_SETTINGS_KEY }, (err, doc) => {
+    resolve({
+      baseUrl: (doc && doc.baseUrl) || (process.env.BID_DATABASE_URL || '').trim(),
+      lastSyncAt: doc ? (doc.lastSyncAt || null) : null,
+      lastSyncOk: doc ? (doc.lastSyncOk == null ? null : doc.lastSyncOk) : null,
+      lastSyncMessage: doc ? (doc.lastSyncMessage || '') : ''
+    });
+  }));
+}
+function setBidDbSyncStatus({ ok, at, message }) {
+  return new Promise(resolve => db.settings.update(
+    { key: BIDDB_SETTINGS_KEY },
+    { $set: { key: BIDDB_SETTINGS_KEY, lastSyncAt: at, lastSyncOk: ok, lastSyncMessage: message } },
+    { upsert: true }, () => resolve()
+  ));
+}
+app.get('/api/bid-db-settings', async (req, res) => { res.json(await getBidDbSettings()); });
+app.post('/api/bid-db-settings', (req, res) => {
+  const baseUrl = String(req.body.baseUrl || '').trim();
+  db.settings.update({ key: BIDDB_SETTINGS_KEY }, { $set: { key: BIDDB_SETTINGS_KEY, baseUrl } }, { upsert: true }, (err) => {
+    if (err) return res.status(500).json({ error: err.message });
+    res.json({ ok: true, baseUrl });
+  });
+});
+
+// ─── Bundled fallback config (schema contract + last-resort defaults) ──
+const BUNDLED_CONFIG_PATH = path.join(__dirname, 'data/division_coverage_config.default.json');
+let BUNDLED_CONFIG = null;
+try { BUNDLED_CONFIG = JSON.parse(fs.readFileSync(BUNDLED_CONFIG_PATH, 'utf8')); }
+catch (e) { console.warn('Could not load bundled coverage config default:', e.message); }
+
+function getCoverageConfigDoc() {
+  return new Promise(resolve => db.coverageConfig.findOne({ _id: 'latest' }, (err, doc) => resolve(doc || null)));
+}
+app.get('/api/coverage-config', async (req, res) => {
+  const doc = await getCoverageConfigDoc();
+  if (doc && doc.config) return res.json({ config: doc.config, source: 'cached', generatedAt: (doc.config.meta && doc.config.meta.generated) || doc.savedAt });
+  if (BUNDLED_CONFIG) return res.json({ config: BUNDLED_CONFIG, source: 'bundled', generatedAt: BUNDLED_CONFIG.meta && BUNDLED_CONFIG.meta.generated });
+  res.status(503).json({ error: 'No coverage config available yet (no live data and no bundled default).' });
+});
+
+// ─── Observations cache ─────────────────────────────────────────────
+function getCachedObservations() {
+  return new Promise(resolve => db.bidObservationsCache.findOne({ _id: 'latest' }, (err, doc) => resolve(doc || null)));
+}
+function saveCachedObservations(payload) {
+  return new Promise(resolve => db.bidObservationsCache.update(
+    { _id: 'latest' },
+    { _id: 'latest', generated: payload.generated, observations: payload.observations, fetchedAt: Date.now() },
+    { upsert: true }, () => resolve()
+  ));
+}
+async function fetchBidObservations(baseUrl) {
+  const url = `${String(baseUrl).replace(/\/+$/, '')}/api/bid-observations`;
+  const r = await fetchWithTimeout(url, {}, 20000);
+  if (!r.ok) throw new Error(`Bid Database returned HTTP ${r.status}`);
+  const data = await r.json();
+  if (!data || !Array.isArray(data.observations)) throw new Error('Unexpected response shape from /api/bid-observations');
+  return data;
+}
+
+// Distinct bidders across the observation set, with aliases/bid counts/
+// divisions merged — the unit the entity-resolution cascade operates on.
+function distinctBidders(observations) {
+  const map = new Map();
+  for (const o of observations) {
+    if (!o.bidder) continue;
+    if (!map.has(o.bidder)) map.set(o.bidder, { bidderName: o.bidder, aliases: new Set(), bidCount: 0, divisions: new Set() });
+    const e = map.get(o.bidder);
+    (o.aliases || []).forEach(a => e.aliases.add(a));
+    e.bidCount++;
+    if (o.csi_division) e.divisions.add(o.csi_division);
+  }
+  return [...map.values()].map(e => ({ ...e, aliases: [...e.aliases], divisions: [...e.divisions] }));
+}
+
+// ─── 2a. Entity resolution (bidder <-> Territory location) ─────────
+// Rule 1 (existing confirmed link) is enforced here: only bidders lacking a
+// confirmed bidderLinks doc run the cascade. Exact/dba/prefix auto-confirm;
+// fuzzy is stored as an unconfirmed suggestion; no match clears the doc to
+// an explicit "unlinked" state so the review panel is a single query.
+async function resolveBidderLinks(observations) {
+  const bidders = distinctBidders(observations);
+  const locations = await new Promise(resolve => db.locations.find({}, (err, docs) => resolve(docs || [])));
+  const locIndex = entityResolution.buildLocationIndex(locations);
+
+  for (const b of bidders) {
+    const existing = await new Promise(resolve => db.bidderLinks.findOne({ bidderName: b.bidderName }, (err, doc) => resolve(doc)));
+    if (existing && existing.confirmed) continue;
+    const match = entityResolution.matchBidder(b.bidderName, b.aliases, locIndex);
+    const doc = match
+      ? { bidderName: b.bidderName, locationId: match.locationId, method: match.method, confirmed: match.confirmed, updatedAt: Date.now() }
+      : { bidderName: b.bidderName, locationId: null, method: 'none', confirmed: false, updatedAt: Date.now() };
+    await new Promise(resolve => db.bidderLinks.update({ bidderName: b.bidderName }, doc, { upsert: true }, () => resolve()));
+  }
+  return bidders;
+}
+
+async function countUnconfirmedBidders(observations) {
+  const bidders = distinctBidders(observations);
+  const links = await new Promise(resolve => db.bidderLinks.find({}, (err, docs) => resolve(new Map((docs || []).map(d => [d.bidderName, d])))));
+  return bidders.filter(b => { const l = links.get(b.bidderName); return !l || !l.confirmed; }).length;
+}
+
+// Review panel: every bidder without a confirmed link, sorted by bid volume
+// so the highest-impact names surface first (acceptance: any bidder with
+// >=4 bids must show up here — trivially true since nothing is filtered out).
+app.get('/api/bidder-links', async (req, res) => {
+  const cache = await getCachedObservations();
+  const observations = cache ? cache.observations : [];
+  const bidders = distinctBidders(observations);
+  const infoByName = new Map(bidders.map(b => [b.bidderName, { bidCount: b.bidCount, divisions: b.divisions }]));
+  db.bidderLinks.find({}, (err, links) => {
+    if (err) return res.status(500).json({ error: err.message });
+    const byName = new Map(links.map(l => [l.bidderName, l]));
+    const names = new Set([...infoByName.keys(), ...byName.keys()]);
+    const out = [...names].map(name => {
+      const link = byName.get(name);
+      const info = infoByName.get(name) || { bidCount: 0, divisions: [] };
+      return {
+        bidderName: name, bidCount: info.bidCount, divisions: info.divisions,
+        locationId: link ? link.locationId : null,
+        method: link ? link.method : null,
+        confirmed: link ? !!link.confirmed : false
+      };
+    }).filter(b => !b.confirmed).sort((a, b) => b.bidCount - a.bidCount);
+    res.json(out);
+  });
+});
+
+app.post('/api/bidder-links/:bidderName', (req, res) => {
+  const bidderName = req.params.bidderName;
+  const locationId = req.body.locationId;
+  if (!locationId) return res.status(400).json({ error: 'locationId required' });
+  db.bidderLinks.update(
+    { bidderName },
+    { bidderName, locationId, method: 'manual', confirmed: true, updatedAt: Date.now() },
+    { upsert: true },
+    (err) => {
+      if (err) return res.status(500).json({ error: err.message });
+      db.coverageDepthCache.remove({}, { multi: true }, () => res.json({ ok: true }));
+    }
+  );
+});
+
+app.post('/api/bidder-links/:bidderName/skip', (req, res) => {
+  const bidderName = req.params.bidderName;
+  db.bidderLinks.update(
+    { bidderName },
+    { bidderName, locationId: null, method: 'skip', confirmed: true, updatedAt: Date.now() },
+    { upsert: true },
+    (err) => {
+      if (err) return res.status(500).json({ error: err.message });
+      res.json({ ok: true });
+    }
+  );
+});
+
+// ─── 2b. Project geocoding cache ────────────────────────────────────
+// Keyed by project name + address hash, so an edited address is simply a
+// cache miss (re-geocoded); an unchanged address is never re-geocoded.
+async function getProjectLocation(projectName, address) {
+  const hash = sha1(String(address || '').trim().toLowerCase());
+  return new Promise(resolve => db.projectLocations.findOne({ _id: `${projectName}::${hash}` }, (err, doc) => resolve(doc)));
+}
+async function syncProjectLocations(observations) {
+  const projects = new Map();
+  for (const o of observations) {
+    if (!o.project || !o.project_address) continue;
+    const key = `${o.project}::${o.project_address}`;
+    if (!projects.has(key)) projects.set(key, { projectName: o.project, address: o.project_address });
+  }
+  for (const { projectName, address } of projects.values()) {
+    const hash = sha1(address.trim().toLowerCase());
+    const id = `${projectName}::${hash}`;
+    const existing = await new Promise(resolve => db.projectLocations.findOne({ _id: id }, (err, doc) => resolve(doc)));
+    if (existing) continue;
+    try {
+      const results = await geocodeAddress(address);
+      const doc = results && results.length
+        ? { _id: id, projectName, address, lat: results[0].lat, lng: results[0].lng, geocodedAt: Date.now() }
+        : { _id: id, projectName, address, lat: null, lng: null, geocodedAt: Date.now(), failed: true };
+      await new Promise(resolve => db.projectLocations.insert(doc, () => resolve()));
+    } catch (e) {
+      console.warn(`Geocoding failed for project "${projectName}": ${e.message}`);
+    }
+    await sleep(1100); // be polite to Nominatim's free tier (1 req/sec)
+  }
+}
+
+// ─── 2c. Distance (ORS matrix, haversine fallback per-pair) ────────
+// Batches every unresolved (linked-bidder -> project) pair into one ORS
+// matrix call; real durations are cached in the existing travelCache (same
+// key scheme as /api/travel-times). Unreachable/partial ORS falls back to
+// haversine per pair, and the basis used is recorded on each result.
+async function resolvePairDistances(pairs) {
+  const out = new Map();
+  const misses = [];
+  for (const [key, coords] of pairs.entries()) {
+    const cacheKey = travelKey(coords.from, coords.to);
+    const cached = await new Promise(resolve => db.travelCache.findOne({ key: cacheKey }, (err, doc) => resolve(doc)));
+    if (cached && typeof cached.seconds === 'number') {
+      out.set(key, { miles: haversineMeters(coords.from, coords.to) / 1609.34, minutes: cached.seconds / 60, basis: 'ors' });
+    } else {
+      misses.push(key);
+    }
+  }
+  if (!misses.length) return out;
+
+  const target = resolveOrsTarget(await getOrsSettings());
+  if (target.usable) {
+    try {
+      const uniqueFrom = [], fromIndex = new Map();
+      const uniqueTo = [], toIndex = new Map();
+      const idxOf = (list, indexMap, coord) => {
+        const ck = `${coord.lat.toFixed(5)},${coord.lng.toFixed(5)}`;
+        if (indexMap.has(ck)) return indexMap.get(ck);
+        const i = list.length; list.push(coord); indexMap.set(ck, i); return i;
+      };
+      const rows = misses.map(key => {
+        const { from, to } = pairs.get(key);
+        return { key, fromIdx: idxOf(uniqueFrom, fromIndex, from), toIdx: idxOf(uniqueTo, toIndex, to) };
+      });
+      const locations = [...uniqueFrom.map(c => [c.lng, c.lat]), ...uniqueTo.map(c => [c.lng, c.lat])];
+      const sources = uniqueFrom.map((_, i) => i);
+      const destinations = uniqueTo.map((_, i) => uniqueFrom.length + i);
+      const r = await fetchWithTimeout(`${target.baseUrl}/v2/matrix/driving-car`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': target.authHeader },
+        body: JSON.stringify({ locations, sources, destinations, metrics: ['duration'] })
+      });
+      const data = await r.json();
+      if (data && data.durations) {
+        for (const row of rows) {
+          const sec = data.durations[row.fromIdx] ? data.durations[row.fromIdx][row.toIdx] : null;
+          if (sec == null) continue;
+          const coords = pairs.get(row.key);
+          out.set(row.key, { miles: haversineMeters(coords.from, coords.to) / 1609.34, minutes: Math.round(sec) / 60, basis: 'ors' });
+          const ck = travelKey(coords.from, coords.to);
+          db.travelCache.update({ key: ck }, { key: ck, seconds: Math.round(sec), createdAt: Date.now() }, { upsert: true });
+        }
+      }
+    } catch (e) {
+      console.warn(`ORS matrix request failed, falling back to haversine for ${misses.length} pairs: ${e.message}`);
+    }
+  }
+  for (const key of misses) {
+    if (out.has(key)) continue;
+    const coords = pairs.get(key);
+    const meters = haversineMeters(coords.from, coords.to);
+    out.set(key, { miles: meters / 1609.34, minutes: meters / 1340, basis: 'haversine' });
+  }
+  return out;
+}
+
+// Resolves every observation's bidder->project distance, dropping in
+// miles/minutes/basis (null when the bidder isn't linked or the project
+// isn't geocoded yet — those observations just aren't usable for derivation).
+async function computeDistances(observations) {
+  const linksByName = await new Promise(resolve => db.bidderLinks.find(
+    { confirmed: true, locationId: { $ne: null } },
+    (err, docs) => resolve(new Map((docs || []).map(d => [d.bidderName, d.locationId])))
+  ));
+  const locationsById = await new Promise(resolve => db.locations.find({}, (err, docs) => resolve(new Map((docs || []).map(l => [l._id, l])))));
+
+  const pairs = new Map();
+  const enriched = [];
+  for (const o of observations) {
+    const locId = linksByName.get(o.bidder);
+    const loc = locId ? locationsById.get(locId) : null;
+    const proj = loc ? await getProjectLocation(o.project, o.project_address) : null;
+    if (!loc || !proj || proj.lat == null) { enriched.push({ ...o, miles: null, minutes: null, basis: null }); continue; }
+    const pairKey = `${locId}::${proj._id}`;
+    pairs.set(pairKey, { from: { lat: loc.lat, lng: loc.lng }, to: { lat: proj.lat, lng: proj.lng } });
+    enriched.push({ ...o, _pairKey: pairKey });
+  }
+
+  const distByPair = await resolvePairDistances(pairs);
+  return enriched.map(o => {
+    if (!o._pairKey) return o;
+    const d = distByPair.get(o._pairKey);
+    const { _pairKey, ...rest } = o;
+    return d ? { ...rest, miles: d.miles, minutes: d.minutes, basis: d.basis } : { ...rest, miles: null, minutes: null, basis: null };
+  });
+}
+
+// ─── 2d. Derivation ─────────────────────────────────────────────────
+async function buildDivisionNamesFromTypes() {
+  const types = await new Promise(resolve => db.locationTypes.find({}, (err, docs) => resolve(docs || [])));
+  const names = {};
+  for (const t of types) {
+    const parsed = parseDivisionFromTypeName(t.name);
+    if (parsed && parsed.tradeName && !names[parsed.division]) names[parsed.division] = parsed.tradeName;
+  }
+  return names;
+}
+
+async function getManualOverrides() {
+  return new Promise(resolve => db.bidderOverrides.find({}, (err, docs) => {
+    const map = {};
+    (docs || []).forEach(d => { const { bidderName, _id, updatedAt, ...rest } = d; map[bidderName] = rest; });
+    resolve(map);
+  }));
+}
+
+async function runDerivation(observations) {
+  const enriched = await computeDistances(observations);
+  const joined = enriched
+    .filter(o => o.miles != null && o.minutes != null && o.dev_pct != null)
+    .map(o => ({ csi_division: o.csi_division, bidderName: o.bidder, dev_pct: o.dev_pct, won: !!o.won, miles: o.miles, minutes: o.minutes, basis: o.basis }));
+
+  const divisionNames = await buildDivisionNamesFromTypes();
+  const manualOverrides = await getManualOverrides();
+  const previous = await getCoverageConfigDoc();
+  const previousConfig = previous ? previous.config : BUNDLED_CONFIG;
+
+  const derived = coverageDerivation.deriveConfig({ observations: joined, divisionNames, manualOverrides, previousConfig });
+  await new Promise(resolve => db.coverageConfig.update({ _id: 'latest' }, { _id: 'latest', config: derived, savedAt: Date.now() }, { upsert: true }, () => resolve()));
+  await new Promise(resolve => db.coverageDepthCache.remove({}, { multi: true }, () => resolve()));
+  return derived;
+}
+
+// Manual per-bidder overrides — small editable collection, merged over
+// auto-derived flags (manual always wins) on the next derivation.
+app.get('/api/coverage-overrides', (req, res) => {
+  db.bidderOverrides.find({}, (err, docs) => {
+    if (err) return res.status(500).json({ error: err.message });
+    res.json(docs || []);
+  });
+});
+app.post('/api/coverage-overrides/:bidderName', async (req, res) => {
+  const bidderName = req.params.bidderName;
+  const body = { ...req.body };
+  delete body._id; delete body.bidderName;
+  db.bidderOverrides.update({ bidderName }, { bidderName, ...body, updatedAt: Date.now() }, { upsert: true }, async (err) => {
+    if (err) return res.status(500).json({ error: err.message });
+    const cache = await getCachedObservations();
+    if (cache) await runDerivation(cache.observations).catch(e => console.warn('Re-derivation after override change failed:', e.message));
+    res.json({ ok: true });
+  });
+});
+app.delete('/api/coverage-overrides/:bidderName', async (req, res) => {
+  db.bidderOverrides.remove({ bidderName: req.params.bidderName }, {}, async (err) => {
+    if (err) return res.status(500).json({ error: err.message });
+    const cache = await getCachedObservations();
+    if (cache) await runDerivation(cache.observations).catch(e => console.warn('Re-derivation after override change failed:', e.message));
+    res.json({ ok: true });
+  });
+});
+
+// ─── 2e. Coverage-depth (H3 hex grid) ───────────────────────────────
+const MAX_HEX_CELLS = 20000; // safety cap for a Pi-class host
+
+// "Linked subs" for a division = bidders with a confirmed, non-skip
+// location link AND actual bid history in that division (not just any
+// location tagged with a matching type) — depth reflects proven presence.
+async function getBiddersForDivision(division, config, observations) {
+  const bidderDivisions = new Map();
+  for (const o of observations) {
+    if (!o.bidder || !o.csi_division) continue;
+    if (!bidderDivisions.has(o.bidder)) bidderDivisions.set(o.bidder, new Set());
+    bidderDivisions.get(o.bidder).add(o.csi_division);
+  }
+  const links = await new Promise(resolve => db.bidderLinks.find({ confirmed: true, locationId: { $ne: null } }, (err, docs) => resolve(docs || [])));
+  const locationsById = await new Promise(resolve => db.locations.find({}, (err, docs) => resolve(new Map((docs || []).map(l => [l._id, l])))));
+  const overrides = (config && config.bidder_overrides) || {};
+
+  const out = [];
+  for (const link of links) {
+    const divs = bidderDivisions.get(link.bidderName);
+    if (!divs || !divs.has(division)) continue;
+    const loc = locationsById.get(link.locationId);
+    if (!loc) continue;
+    const ov = overrides[link.bidderName];
+    const scoped = ov && (!ov.division || ov.division === division) ? ov : null;
+    out.push({
+      locationId: loc._id, name: loc.name, lat: loc.lat, lng: loc.lng,
+      multiplier: scoped && scoped.weight_multiplier != null ? scoped.weight_multiplier : 1,
+      medianSupportOnly: !!(scoped && scoped.median_support_only),
+      ignoreDistanceDecay: !!(scoped && scoped.ignore_distance_decay),
+      competitiveRadiusMi: scoped && scoped.competitive_radius_mi != null ? scoped.competitive_radius_mi : null,
+      outerRadiusMi: scoped && scoped.outer_radius_mi != null ? scoped.outer_radius_mi : null
+    });
+  }
+  return out;
+}
+
+app.get('/api/coverage-depth', async (req, res) => {
+  const resolution = clampNum(req.query.resolution, 5, 9, 7);
+  const divisions = String(req.query.divisions || '').split(',').map(s => s.trim()).filter(Boolean);
+  if (!divisions.length) return res.status(400).json({ error: 'divisions query param required (comma-separated CSI codes)' });
+
+  const configDoc = await getCoverageConfigDoc();
+  const config = configDoc ? configDoc.config : BUNDLED_CONFIG;
+  if (!config) return res.status(503).json({ error: 'No coverage config available yet — run a bid-data sync first.' });
+
+  const cacheDoc = await getCachedObservations();
+  const observations = cacheDoc ? cacheDoc.observations : [];
+
+  const out = { resolution, divisions: {} };
+  for (const division of divisions) {
+    const divCfg = config.divisions[division];
+    if (!divCfg || divCfg.always_covered) { out.divisions[division] = { alwaysCovered: true }; continue; }
+
+    const cached = await new Promise(resolve => db.coverageDepthCache.findOne({ _id: `${division}:${resolution}` }, (err, doc) => resolve(doc)));
+    if (cached) { out.divisions[division] = { cells: cached.cells, computedAt: cached.computedAt }; continue; }
+
+    const bidders = await getBiddersForDivision(division, config, observations);
+    if (!bidders.length) { out.divisions[division] = { cells: {}, computedAt: Date.now(), note: 'No linked subs with bid history in this division yet.' }; continue; }
+
+    const projLocs = await new Promise(resolve => db.projectLocations.find({ lat: { $ne: null } }, (err, docs) => resolve(docs || [])));
+    const allPoints = [...bidders.map(b => ({ lat: b.lat, lng: b.lng })), ...projLocs.map(p => ({ lat: p.lat, lng: p.lng }))];
+
+    const cells = coverageDepthLib.buildHexGrid(allPoints, resolution);
+    if (cells.length > MAX_HEX_CELLS) {
+      return res.status(400).json({ error: `Grid too large (${cells.length} cells) at resolution ${resolution} for this market's extent — try a coarser (lower) resolution.` });
+    }
+    const depths = coverageDepthLib.computeDivisionDepth(cells, bidders, divCfg);
+    await new Promise(resolve => db.coverageDepthCache.update(
+      { _id: `${division}:${resolution}` }, { _id: `${division}:${resolution}`, cells: depths, computedAt: Date.now() }, { upsert: true }, () => resolve()
+    ));
+    out.divisions[division] = { cells: depths, computedAt: Date.now() };
+  }
+  res.json(out);
+});
+
+// ─── Sync orchestration ─────────────────────────────────────────────
+async function runFullSync(baseUrl) {
+  const payload = await fetchBidObservations(baseUrl);
+  await saveCachedObservations(payload);
+  const bidders = await resolveBidderLinks(payload.observations);
+  await syncProjectLocations(payload.observations);
+  const derived = await runDerivation(payload.observations);
+  const needsReview = await countUnconfirmedBidders(payload.observations);
+  return { observationCount: payload.observations.length, bidderCount: bidders.length, needsReview, generatedAt: derived.meta.generated };
+}
+
+app.post('/api/bid-sync', async (req, res) => {
+  const settings = await getBidDbSettings();
+  if (!settings.baseUrl) return res.status(400).json({ error: 'Set a Bid Database URL first (⚙ Bid Data Source).' });
+  try {
+    const summary = await runFullSync(settings.baseUrl);
+    await setBidDbSyncStatus({ ok: true, at: Date.now(), message: `Synced ${summary.observationCount} observations, ${summary.needsReview} bidders need review.` });
+    res.json({ ok: true, ...summary, source: 'live' });
+  } catch (e) {
+    await setBidDbSyncStatus({ ok: false, at: Date.now(), message: e.message });
+    res.status(502).json({ error: `Bid Database sync failed: ${e.message}` });
+  }
+});
+
 // ─── Map Tabs ─────────────────────────────────────────────────────
 app.get('/api/map-tabs', (req, res) => {
   db.mapTabs.find({}).sort({ order: 1, createdAt: 1 }).exec((err, docs) => {
@@ -702,6 +1199,23 @@ app.delete('/api/map-tabs/:id', (req, res) => {
     });
   });
 });
+
+// Fire-and-forget background sync if the bid-data cache is stale (or never
+// populated) — the manual "🔄 Refresh Bid Data" button covers the rest.
+(async () => {
+  try {
+    const settings = await getBidDbSettings();
+    if (!settings.baseUrl) return;
+    const stale = !settings.lastSyncAt || (Date.now() - settings.lastSyncAt) > BID_SYNC_STALE_MS;
+    if (!stale) return;
+    console.log('Bid data cache is stale — running a background sync...');
+    const summary = await runFullSync(settings.baseUrl);
+    await setBidDbSyncStatus({ ok: true, at: Date.now(), message: `Startup sync: ${summary.observationCount} observations, ${summary.needsReview} bidders need review.` });
+    console.log(`Bid data sync complete (${summary.observationCount} observations).`);
+  } catch (e) {
+    console.warn(`Startup bid-data sync skipped/failed: ${e.message}`);
+  }
+})();
 
 const server = app.listen(PORT, '0.0.0.0', () => {
   console.log(`\n🚨 PROJECT SECRET WISHES 🚨`);
