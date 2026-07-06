@@ -776,15 +776,37 @@ function getDivisionNameOverrideMap() {
 // applied. This is the single point where that override takes effect, so
 // every consumer (derivation, coverage-depth grouping, the link review list)
 // stays consistent with each other.
+const BID_RECENCY_KEY = 'bidRecency';
+function getBidRecencyYears() {
+  return new Promise(resolve => db.settings.findOne({ key: BID_RECENCY_KEY }, (err, doc) => resolve(doc && doc.years > 0 ? doc.years : null)));
+}
+app.get('/api/bid-recency', async (req, res) => { res.json({ years: await getBidRecencyYears() }); });
+app.post('/api/bid-recency', async (req, res) => {
+  const raw = req.body.years;
+  const years = raw != null && raw !== '' && Number(raw) > 0 ? Number(raw) : null;
+  db.settings.update({ key: BID_RECENCY_KEY }, { $set: { key: BID_RECENCY_KEY, years } }, { upsert: true }, async (err) => {
+    if (err) return res.status(500).json({ error: err.message });
+    await reDeriveIfPossible();
+    res.json({ ok: true, years });
+  });
+});
+
 async function getEffectiveObservations() {
   const cache = await getCachedObservations();
   if (!cache) return [];
   const overrides = await getBidderDivisionOverrideMap();
-  if (!overrides.size) return cache.observations;
-  return cache.observations.map(o => {
-    const forced = overrides.get(o.bidder);
-    return forced ? { ...o, csi_division: forced } : o;
-  });
+  const years = await getBidRecencyYears();
+  const cutoff = years ? Date.now() - years * 365.25 * 24 * 3600 * 1000 : null;
+  return cache.observations
+    .filter(o => {
+      if (!cutoff) return true;
+      const t = o.project_date ? new Date(o.project_date).getTime() : NaN;
+      return Number.isNaN(t) || t >= cutoff; // unparseable/missing date -> keep it, don't discard data we can't classify
+    })
+    .map(o => {
+      const forced = overrides.get(o.bidder);
+      return forced ? { ...o, csi_division: forced } : o;
+    });
 }
 
 // Re-run derivation off the current observations cache (if any) — used
@@ -1331,6 +1353,123 @@ app.get('/api/coverage-depth', async (req, res) => {
     out.divisions[division] = { cells: depths, computedAt: Date.now(), padMiles, resolution: usedResolution };
   }
   res.json(out);
+});
+
+// ─── Linked contractors (the roster that actually feeds the map) ───
+// Every confirmed, located bidder, with the divisions they contribute to
+// and the effective radius/weight/flags applied for each — a quick roster
+// view before drilling into any one bidder's full audit.
+app.get('/api/linked-contractors', async (req, res) => {
+  const configDoc = await getCoverageConfigDoc();
+  const config = configDoc ? configDoc.config : BUNDLED_CONFIG;
+  const observations = await getEffectiveObservations();
+  const bidderDivisions = new Map();
+  for (const o of observations) {
+    if (!o.bidder || !o.csi_division) continue;
+    if (!bidderDivisions.has(o.bidder)) bidderDivisions.set(o.bidder, new Set());
+    bidderDivisions.get(o.bidder).add(o.csi_division);
+  }
+  const links = await new Promise(resolve => db.bidderLinks.find({ confirmed: true, locationId: { $ne: null } }, (err, docs) => resolve(docs || [])));
+  const locationsById = await new Promise(resolve => db.locations.find({}, (err, docs) => resolve(new Map((docs || []).map(l => [l._id, l])))));
+  const overrides = (config && config.bidder_overrides) || {};
+
+  const out = links.map(link => {
+    const loc = locationsById.get(link.locationId);
+    const divs = [...(bidderDivisions.get(link.bidderName) || [])].sort();
+    const ov = overrides[link.bidderName];
+    return {
+      bidderName: link.bidderName,
+      locationName: loc ? loc.name : null,
+      locationId: link.locationId,
+      divisions: divs,
+      alwaysCovered: divs.every(d => config && config.divisions[d] && config.divisions[d].always_covered),
+      weightMultiplier: ov && ov.weight_multiplier != null ? ov.weight_multiplier : null,
+      medianSupportOnly: !!(ov && ov.median_support_only),
+      ignoreDistanceDecay: !!(ov && ov.ignore_distance_decay),
+      customCompetitiveRadiusMi: ov && ov.competitive_radius_mi != null ? ov.competitive_radius_mi : null
+    };
+  }).filter(b => b.divisions.length && !b.alwaysCovered) // distance-blind divisions aren't depth-mapped at all
+    .sort((a, b) => a.bidderName.localeCompare(b.bidderName));
+  res.json(out);
+});
+
+// Full audit trail for one bidder: per division they've bid in, the raw
+// joined observations (distance + deviation + outcome), their own band
+// stats, and exactly which radius/weight/flags are being applied and why —
+// so a "this contractor shouldn't be competitive here" read can be checked
+// against the actual numbers instead of taken on faith.
+app.get('/api/bidder-audit/:bidderName', async (req, res) => {
+  const bidderName = req.params.bidderName;
+  const link = await new Promise(resolve => db.bidderLinks.findOne({ bidderName }, (err, doc) => resolve(doc)));
+  if (!link || !link.confirmed || !link.locationId) {
+    return res.status(404).json({ error: 'This bidder is not confirmed/linked to a location yet.' });
+  }
+  const location = await new Promise(resolve => db.locations.findOne({ _id: link.locationId }, (err, doc) => resolve(doc)));
+  if (!location) return res.status(404).json({ error: 'Linked location no longer exists — try Re-match Subcontractors.' });
+
+  const configDoc = await getCoverageConfigDoc();
+  const config = configDoc ? configDoc.config : BUNDLED_CONFIG;
+  const overrides = (config && config.bidder_overrides) || {};
+  const ov = overrides[bidderName] || null;
+
+  const allObservations = await getEffectiveObservations();
+  const bidderObservations = allObservations.filter(o => o.bidder === bidderName);
+  const enriched = await computeDistances(bidderObservations);
+
+  const byDivision = new Map();
+  for (const o of enriched) {
+    if (!o.csi_division) continue;
+    if (!byDivision.has(o.csi_division)) byDivision.set(o.csi_division, []);
+    byDivision.get(o.csi_division).push(o);
+  }
+
+  const divisions = {};
+  for (const [code, obs] of byDivision.entries()) {
+    const divCfg = (config && config.divisions[code]) || null;
+    const usable = obs.filter(o => o.dev_pct != null && o.miles != null && o.minutes != null);
+    const scoped = ov && (!ov.division || ov.division === code) ? ov : null;
+
+    const miBands = coverageDerivation.computeBandStats(usable, coverageDerivation.MILE_EDGES, 'miles');
+    const ownCompetitive = coverageDerivation.findCompetitiveRadius(usable, coverageDerivation.MILE_EDGES, 'miles');
+    const ownOuter = coverageDerivation.findOuterRadius(usable, coverageDerivation.MILE_EDGES, 'miles');
+
+    divisions[code] = {
+      name: (divCfg && divCfg.name) || code,
+      alwaysCovered: !!(divCfg && divCfg.always_covered),
+      tradeTier: divCfg ? divCfg.tier : null,
+      tradeCompetitiveRadiusMi: divCfg ? divCfg.competitive_radius_mi : null,
+      tradeOuterRadiusMi: divCfg ? divCfg.outer_radius_mi : null,
+      effective: {
+        competitiveRadiusMi: (scoped && scoped.competitive_radius_mi != null) ? scoped.competitive_radius_mi : (divCfg ? divCfg.competitive_radius_mi : null),
+        outerRadiusMi: (scoped && scoped.outer_radius_mi != null) ? scoped.outer_radius_mi : (divCfg ? divCfg.outer_radius_mi : null),
+        weightMultiplier: (scoped && scoped.weight_multiplier != null) ? scoped.weight_multiplier : 1,
+        medianSupportOnly: !!(scoped && scoped.median_support_only),
+        ignoreDistanceDecay: !!(scoped && scoped.ignore_distance_decay),
+        source: scoped ? (scoped.note ? 'override: ' + scoped.note : 'override') : 'division default'
+      },
+      ownBandStats: coverageDerivation.MILE_LABELS.map((label, i) => ({
+        band: label, n: miBands[i].n, medianDevPct: miBands[i].medianDev,
+        winRate: miBands[i].n ? Math.round((miBands[i].list.filter(o => o.won).length / miBands[i].n) * 100) / 100 : null
+      })),
+      ownCrossover: {
+        competitiveRadiusMi: ownCompetitive ? ownCompetitive.edge : null,
+        competitiveSupportN: ownCompetitive ? ownCompetitive.bandN : 0,
+        outerRadiusMi: ownOuter ? ownOuter.edge : null,
+        outerSupportN: ownOuter ? ownOuter.bandN : 0
+      },
+      usableCount: usable.length,
+      bids: obs.map(o => ({
+        project: o.project, projectDate: o.project_date, miles: o.miles != null ? Math.round(o.miles * 10) / 10 : null,
+        minutes: o.minutes != null ? Math.round(o.minutes) : null, basis: o.basis,
+        devPct: o.dev_pct, won: !!o.won, nBidsInPackage: o.n_bids_in_package
+      })).sort((a, b) => (a.miles ?? Infinity) - (b.miles ?? Infinity))
+    };
+  }
+
+  res.json({
+    bidderName, location: { name: location.name, lat: location.lat, lng: location.lng },
+    divisions
+  });
 });
 
 // ─── Sync orchestration ─────────────────────────────────────────────
