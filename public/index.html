@@ -768,7 +768,7 @@
 </div>
 
 <!-- MAKE-PERMANENT MODAL -->
-<div id="modal-overlay" class="modal-overlay" style="display:none;">
+<div id="modal-overlay" class="modal-overlay" style="display:none;" onclick="if (event.target === this) closeModal()">
   <div class="modal" id="modal-box">
     <div class="modal-header" id="modal-title"></div>
     <div class="modal-body" id="modal-body"></div>
@@ -1887,6 +1887,9 @@ async function openBidderAudit(encodedName) {
         ${bcBidsTableHtml(d.bids)}
       </div>`;
     }).join('')}
+    <div style="display:flex; justify-content:flex-end">
+      <button class="btn btn-ghost" onclick="closeModal()">Close</button>
+    </div>
   `;
   openModal(`📋 ${escapeHtml(bidderName)}`, body, { wide: true });
 }
@@ -4789,6 +4792,12 @@ function closeModal() {
   routeState = null;
   fgApplyOnClose();   // apply deferred filter changes to the map on close
 }
+
+// Escape closes whatever modal is open — a safety net for any modal body
+// that (like the bidder-audit one used to) doesn't include its own button.
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && document.getElementById('modal-overlay').style.display !== 'none') closeModal();
+});
 
 async function confirmMakePermanent() {
   const p = projectPins.find(x => x.id === makePermanentPinId);
