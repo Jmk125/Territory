@@ -1551,7 +1551,10 @@ async function saveDivisionRow(btn) {
 }
 
 // ── Bidder links table: full roster, reassign/unlink/skip/division ─
-function bcLocationSelectHtml(currentId, divisions) {
+// suggestion: { locationId, ratio } — the closest candidate regardless of
+// the auto-fuzzy threshold, pre-selected (but never auto-saved) so a human
+// can eyeball a near-miss and just hit Save instead of hunting the list.
+function bcLocationSelectHtml(currentId, divisions, suggestion) {
   const matchTypeIds = new Set();
   if (divisions && divisions.length) {
     for (const t of locationTypes) {
@@ -1559,10 +1562,15 @@ function bcLocationSelectHtml(currentId, divisions) {
       if (m && divisions.includes(m[1])) matchTypeIds.add(t._id);
     }
   }
+  const preselectId = currentId || (suggestion && suggestion.locationId) || null;
   const preferredList = locations.filter(l => matchTypeIds.has(l.typeId));
   const restList = locations.filter(l => !matchTypeIds.has(l.typeId));
-  const opt = l => `<option value="${l._id}" ${l._id === currentId ? 'selected' : ''}>${escapeHtml(l.name)}</option>`;
-  let html = '<option value="">— none —</option>';
+  const opt = l => {
+    const isSuggested = !currentId && suggestion && l._id === suggestion.locationId;
+    const label = isSuggested ? `${escapeHtml(l.name)} (${Math.round(suggestion.ratio * 100)}% guess)` : escapeHtml(l.name);
+    return `<option value="${l._id}" ${l._id === preselectId ? 'selected' : ''}>${label}</option>`;
+  };
+  let html = `<option value="" ${preselectId ? '' : 'selected'}>— none —</option>`;
   // If the linked ID isn't in the current location list, say so explicitly
   // instead of silently falling back to "— none —" (which looks identical
   // to "never linked" and hides a real data-mismatch problem).
@@ -1577,9 +1585,18 @@ function bcLocationSelectHtml(currentId, divisions) {
 function bcDivisionSelectHtml(current, seenDivisions) {
   const divs = (coverageConfig && coverageConfig.config && coverageConfig.config.divisions) || {};
   const codes = [...new Set([...Object.keys(divs), ...(seenDivisions || [])])].sort();
-  let html = '<option value="">(from bid data)</option>';
+  let html = '<option value="">(no override)</option>';
   html += codes.map(c => `<option value="${c}" ${c === current ? 'selected' : ''}>${c} ${escapeHtml((divs[c] && divs[c].name) || '')}</option>`).join('');
   return html;
+}
+
+// The actual division(s) this bidder's bids are tagged with in the Bid
+// Database — read-only, shown next to the override select so it's clear
+// what "(no override)" actually resolves to.
+function bcActualDivisionsLabel(divisions) {
+  const divs = (coverageConfig && coverageConfig.config && coverageConfig.config.divisions) || {};
+  if (!divisions || !divisions.length) return '<span class="hint">no bid data</span>';
+  return divisions.map(c => `${c} ${escapeHtml((divs[c] && divs[c].name) || '')}`).join(', ');
 }
 
 async function renderBidderLinksTable() {
@@ -1593,19 +1610,21 @@ async function renderBidderLinksTable() {
   const list = q ? bidderLinksAll.filter(b => b.bidderName.toLowerCase().includes(q)) : bidderLinksAll;
   if (countEl) countEl.textContent = `(${bidderLinksAll.length} total, ${bidderLinksAll.filter(b => !b.confirmed).length} need review)`;
   if (!list.length) { host.innerHTML = '<span class="hint">Sync bid data to see bidders.</span>'; return; }
-  const locById = new Map(locations.map(l => [l._id, l]));
   host.innerHTML = `<table class="bc-table"><thead><tr>
-      <th>Bidder</th><th>Bids</th><th>Division</th><th>Linked location</th><th>Status</th><th></th>
+      <th>Bidder</th><th>Bids</th><th>Division (actual / override)</th><th>Linked location</th><th>Status</th><th></th>
     </tr></thead><tbody>
     ${list.map(b => {
       const statusTag = b.confirmed
         ? (b.locationId ? `<span class="bc-tag ok">${escapeHtml(b.method)}</span>` : `<span class="bc-tag">skipped</span>`)
-        : (b.method === 'fuzzy' ? `<span class="bc-tag warn">fuzzy — needs confirm</span>` : `<span class="bc-tag warn">unlinked</span>`);
+        : (b.suggestion ? `<span class="bc-tag warn">${Math.round(b.suggestion.ratio * 100)}% guess — needs confirm</span>` : `<span class="bc-tag warn">no candidate found</span>`);
       return `<tr data-bidder="${escapeHtml(b.bidderName)}">
         <td class="bc-name-cell" title="${escapeHtml(b.bidderName)}">${escapeHtml(b.bidderName)}</td>
         <td>${b.bidCount}</td>
-        <td><select class="bc-link-division">${bcDivisionSelectHtml(b.divisionOverride, b.divisions)}</select></td>
-        <td><select class="bc-link-location">${bcLocationSelectHtml(b.locationId, b.divisions)}</select></td>
+        <td>
+          <div class="hint" style="margin-bottom:2px">${bcActualDivisionsLabel(b.divisions)}</div>
+          <select class="bc-link-division">${bcDivisionSelectHtml(b.divisionOverride, b.divisions)}</select>
+        </td>
+        <td><select class="bc-link-location">${bcLocationSelectHtml(b.locationId, b.divisions, b.suggestion)}</select></td>
         <td>${statusTag}</td>
         <td style="white-space:nowrap">
           <button class="btn btn-ghost btn-sm" title="Save location + division" onclick="saveBidderLinkRow(this)">Save</button>

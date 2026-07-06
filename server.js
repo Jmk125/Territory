@@ -847,26 +847,44 @@ async function countUnconfirmedBidders(observations) {
 app.get('/api/bidder-links', async (req, res) => {
   const observations = await getEffectiveObservations();
   const bidders = distinctBidders(observations);
-  const infoByName = new Map(bidders.map(b => [b.bidderName, { bidCount: b.bidCount, divisions: b.divisions }]));
+  const infoByName = new Map(bidders.map(b => [b.bidderName, { bidCount: b.bidCount, divisions: b.divisions, aliases: b.aliases }]));
   const divisionOverrides = await getBidderDivisionOverrideMap();
-  db.bidderLinks.find({}, (err, links) => {
-    if (err) return res.status(500).json({ error: err.message });
-    const byName = new Map(links.map(l => [l.bidderName, l]));
-    const names = new Set([...infoByName.keys(), ...byName.keys()]);
-    let out = [...names].map(name => {
-      const link = byName.get(name);
-      const info = infoByName.get(name) || { bidCount: 0, divisions: [] };
-      return {
-        bidderName: name, bidCount: info.bidCount, divisions: info.divisions,
-        divisionOverride: divisionOverrides.get(name) || null,
-        locationId: link ? link.locationId : null,
-        method: link ? link.method : null,
-        confirmed: link ? !!link.confirmed : false
-      };
-    }).sort((a, b) => b.bidCount - a.bidCount);
-    if (req.query.all !== 'true') out = out.filter(b => !b.confirmed);
-    res.json(out);
-  });
+  const links = await new Promise((resolve, reject) => db.bidderLinks.find({}, (err, docs) => err ? reject(err) : resolve(docs)));
+  const byName = new Map(links.map(l => [l.bidderName, l]));
+  const names = new Set([...infoByName.keys(), ...byName.keys()]);
+
+  let out = [...names].map(name => {
+    const link = byName.get(name);
+    const info = infoByName.get(name) || { bidCount: 0, divisions: [], aliases: [] };
+    return {
+      bidderName: name, bidCount: info.bidCount, divisions: info.divisions,
+      divisionOverride: divisionOverrides.get(name) || null,
+      locationId: link ? link.locationId : null,
+      method: link ? link.method : null,
+      confirmed: link ? !!link.confirmed : false
+    };
+  }).sort((a, b) => b.bidCount - a.bidCount);
+  if (req.query.all !== 'true') out = out.filter(b => !b.confirmed);
+
+  // For anything still unconfirmed, surface the closest candidate + score
+  // regardless of the auto-fuzzy threshold — so a human can eyeball a
+  // near-miss ("Electrical" vs "Electric") and confirm it in one click
+  // instead of hunting through the full location list.
+  const SUGGESTION_FLOOR = 0.4; // below this, showing a "guess" would just mislead
+  const unconfirmed = out.filter(b => !b.confirmed);
+  if (unconfirmed.length) {
+    const locations = await new Promise(resolve => db.locations.find({}, (err, docs) => resolve(docs || [])));
+    const locIndex = entityResolution.buildLocationIndex(locations);
+    for (const b of unconfirmed) {
+      const info = infoByName.get(b.bidderName) || { aliases: [] };
+      const candidate = entityResolution.findBestCandidate(b.bidderName, info.aliases, locIndex);
+      if (candidate && candidate.ratio >= SUGGESTION_FLOOR) {
+        b.suggestion = { locationId: candidate.locationId, ratio: Math.round(candidate.ratio * 100) / 100 };
+      }
+    }
+  }
+
+  res.json(out);
 });
 
 // Clears any bidderLinks doc pointing at a location that no longer exists
