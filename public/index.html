@@ -1432,6 +1432,17 @@ let bidderLinksAll = [];       // last full fetch of /api/bidder-links?all=true
 let coverageOverridesAll = []; // last fetch of /api/coverage-overrides
 
 async function renderBidCoverageTab() {
+  // Locations/types can change from elsewhere in the app (batch import,
+  // edits) without this tab's cached globals refreshing on their own — pull
+  // both fresh every time this tab renders so "Linked Location" reflects
+  // what's actually in the DB right now, not a stale in-page snapshot.
+  try {
+    [locationTypes, locations] = await Promise.all([
+      fetch('/api/location-types').then(r => r.json()),
+      fetch('/api/locations').then(r => r.json())
+    ]);
+  } catch (e) { /* keep whatever was already loaded */ }
+
   await refreshBidCovStatus();
   const urlInput = document.getElementById('bc-biddb-url');
   if (urlInput && !urlInput.dataset.dirty) urlInput.value = (bidDbSettings && bidDbSettings.baseUrl) || '';
@@ -1552,6 +1563,12 @@ function bcLocationSelectHtml(currentId, divisions) {
   const restList = locations.filter(l => !matchTypeIds.has(l.typeId));
   const opt = l => `<option value="${l._id}" ${l._id === currentId ? 'selected' : ''}>${escapeHtml(l.name)}</option>`;
   let html = '<option value="">— none —</option>';
+  // If the linked ID isn't in the current location list, say so explicitly
+  // instead of silently falling back to "— none —" (which looks identical
+  // to "never linked" and hides a real data-mismatch problem).
+  if (currentId && !locations.some(l => l._id === currentId)) {
+    html += `<option value="${currentId}" selected disabled>⚠ missing location (id ${currentId})</option>`;
+  }
   if (preferredList.length) html += `<optgroup label="Matching type">${preferredList.map(opt).join('')}</optgroup>`;
   html += `<optgroup label="All locations">${restList.map(opt).join('')}</optgroup>`;
   return html;
