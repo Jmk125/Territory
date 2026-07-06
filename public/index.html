@@ -884,6 +884,7 @@
         <span class="hint">Rename a division's display label or set its target bidder count — both persist across syncs.</span>
       </div>
       <div class="bidcov-section-body" id="bidcov-body-divisions" style="display:none">
+        <button class="btn btn-ghost btn-sm" onclick="addDivision()" style="margin-bottom:8px">+ Add Division</button>
         <div id="bc-divisions-table"><span class="hint">Sync bid data to see divisions.</span></div>
       </div>
     </div>
@@ -1709,7 +1710,10 @@ function renderDivisionsTable() {
         <td>${escapeHtml(d.tier || '')}</td>
         <td>${radii}</td>
         <td><input type="number" class="bc-div-target" min="1" max="10" value="${d.target_bidders || 3}" style="width:48px"></td>
-        <td><button class="btn btn-ghost btn-sm" onclick="saveDivisionRow(this)">Save</button></td>
+        <td style="white-space:nowrap">
+          <button class="btn btn-ghost btn-sm" onclick="saveDivisionRow(this)">Save</button>
+          <button class="btn btn-ghost btn-sm" title="Remove this division/package" onclick="removeDivisionRow(this)">🗑</button>
+        </td>
       </tr>`;
     }).join('')}
   </tbody></table>`;
@@ -1730,6 +1734,39 @@ async function saveDivisionRow(btn) {
   await Promise.all(tasks);
   await refreshBidCovStatus();
   renderDivisionsTable();
+  if (depthEnabled) await renderDepthLayer(true);
+}
+
+// Splitting a division into finer packages (e.g. "05 Steel" -> "05 Structural
+// Steel" + "05B Misc Steel") starts here: create the new empty package, then
+// go check the relevant boxes for the subs that belong in it under Bidder
+// Links — the next sync/re-derive gives it real numbers once it has bids.
+async function addDivision() {
+  const code = (prompt('New division/package code (short, e.g. "05B"):') || '').trim();
+  if (!code) return;
+  const name = (prompt('Display name (e.g. "Misc Steel"):', '') || '').trim();
+  const r = await fetch('/api/coverage-config/add-division', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code, name })
+  }).then(r => r.json());
+  if (!r.ok) { alert(r.error || 'Failed to add division.'); return; }
+  bidderLinksAll = [];
+  await refreshBidCovStatus();
+  renderDivisionsTable();
+  populateBidcovDivisionFilters();
+  await renderBidderLinksTable();
+}
+
+async function removeDivisionRow(btn) {
+  const row = btn.closest('tr');
+  const code = row.dataset.division;
+  const d = coverageConfig.config.divisions[code];
+  if (!confirm(`Remove division "${code} ${d.name || ''}"? Any bidders manually assigned to it will revert to their actual bid-data division. If real bid data is still tagged with this exact code, it will reappear on the next sync.`)) return;
+  await fetch(`/api/coverage-config/division/${encodeURIComponent(code)}`, { method: 'DELETE' });
+  bidderLinksAll = [];
+  await refreshBidCovStatus();
+  renderDivisionsTable();
+  populateBidcovDivisionFilters();
+  await renderBidderLinksTable();
   if (depthEnabled) await renderDepthLayer(true);
 }
 

@@ -1302,6 +1302,55 @@ app.post('/api/coverage-config/target-bidders/:division', async (req, res) => {
   });
 });
 
+// Manually create a division/package that doesn't exist in the Bid
+// Database's own CSI-division tagging — e.g. splitting one division into
+// finer packages (05 Structural Steel vs 05 Misc Steel). Starts as an empty
+// placeholder; assigning bidders to it via a bidder-division override gives
+// it real bid history, and the next re-derivation replaces the placeholder
+// with real tier/radius numbers computed from that data.
+app.post('/api/coverage-config/add-division', async (req, res) => {
+  const code = String(req.body.code || '').trim();
+  const name = String(req.body.name || '').trim() || code;
+  if (!code) return res.status(400).json({ error: 'code required' });
+  const doc = await getCoverageConfigDoc();
+  const config = (doc && doc.config) ? doc.config : JSON.parse(JSON.stringify(BUNDLED_CONFIG));
+  if (config.divisions[code]) return res.status(409).json({ error: `Division "${code}" already exists` });
+  config.divisions[code] = {
+    name, tier: 'insufficient_data', target_bidders: 3,
+    evidence: { usable_bids: 0, median_dev_pct_by_band: {}, band_sample_sizes: {}, share_of_bids_from_50plus_mi: 0 },
+    competitive_radius_mi: 30, outer_radius_mi: 60, competitive_radius_min: 40, outer_radius_min: 70,
+    weights: { inside_competitive: 1.0, beyond_outer: 0.0, competitive_to_outer: 0.7 },
+    note: 'Manually added — no bid data yet. Assign bidders to this division in Bidder Links; the next sync/re-derive replaces these placeholder numbers with real ones.'
+  };
+  await new Promise(resolve => db.divisionOverrides.update({ division: code }, { division: code, name, updatedAt: Date.now() }, { upsert: true }, () => resolve()));
+  await new Promise(resolve => db.coverageConfig.update({ _id: 'latest' }, { _id: 'latest', config, savedAt: Date.now() }, { upsert: true }, () => resolve()));
+  await new Promise(resolve => db.coverageDepthCache.remove({}, { multi: true }, () => resolve()));
+  res.json({ ok: true, code });
+});
+
+// Removes a division/package Territory is tracking. If real bid data is
+// still tagged with this exact code, it simply reappears on the next sync —
+// this only clears a stale/placeholder entry, plus any bidder overrides
+// pointing at it (those bidders fall back to their actual bid-data division
+// instead of silently losing their assignment).
+app.delete('/api/coverage-config/division/:code', async (req, res) => {
+  const code = req.params.code;
+  const doc = await getCoverageConfigDoc();
+  if (doc && doc.config && doc.config.divisions[code]) {
+    delete doc.config.divisions[code];
+    await new Promise(resolve => db.coverageConfig.update({ _id: 'latest' }, { _id: 'latest', config: doc.config, savedAt: doc.savedAt }, { upsert: true }, () => resolve()));
+  }
+  await new Promise(resolve => db.divisionOverrides.remove({ division: code }, {}, () => resolve()));
+  const affected = await new Promise(resolve => db.bidderDivisionOverrides.find({ divisions: code }, (err, docs) => resolve(docs || [])));
+  for (const d of affected) {
+    const remaining = (d.divisions || []).filter(c => c !== code);
+    if (remaining.length) await new Promise(resolve => db.bidderDivisionOverrides.update({ _id: d._id }, { $set: { divisions: remaining } }, {}, () => resolve()));
+    else await new Promise(resolve => db.bidderDivisionOverrides.remove({ _id: d._id }, {}, () => resolve()));
+  }
+  await new Promise(resolve => db.coverageDepthCache.remove({}, { multi: true }, () => resolve()));
+  res.json({ ok: true });
+});
+
 // ─── 2e. Coverage-depth (H3 hex grid) ───────────────────────────────
 const MAX_HEX_CELLS = 20000; // safety cap for a Pi-class host
 
