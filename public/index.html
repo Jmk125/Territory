@@ -814,6 +814,10 @@
         <button class="btn btn-ghost btn-sm" onclick="saveBidDbSettingsTab()">Save</button>
         <button class="btn btn-success btn-sm" id="bc-sync-btn" onclick="runBidSyncTab()">🔄 Refresh Bid Data</button>
       </div>
+      <div class="row" style="gap:6px; align-items:center; margin-top:8px">
+        <button class="btn btn-ghost btn-sm" id="bc-resync-btn" onclick="runBidderResync()">🔁 Re-match Subcontractors</button>
+        <span class="hint">Clears any bidder link pointing at a location that no longer exists (e.g. after a batch re-import) and re-attempts matching.</span>
+      </div>
       <div id="bc-sync-status" class="hint" style="margin-top:6px"></div>
     </div>
 
@@ -1467,6 +1471,27 @@ async function runBidSyncTab() {
   }
   if (btn) { btn.disabled = false; btn.textContent = '🔄 Refresh Bid Data'; }
   if (status) delete status.dataset.transient;
+  await renderBidCoverageTab();
+  if (depthEnabled) await renderDepthLayer(true);
+}
+
+async function runBidderResync() {
+  const btn = document.getElementById('bc-resync-btn');
+  const status = document.getElementById('bc-sync-status');
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Re-matching…'; }
+  if (status) { status.dataset.transient = '1'; status.textContent = 'Clearing broken links and re-matching…'; status.style.color = 'var(--text2)'; }
+  try {
+    const r = await fetch('/api/bidder-links/resync', { method: 'POST' }).then(r => r.json());
+    if (status) {
+      if (r.ok) { status.textContent = `🟢 Cleared ${r.clearedDangling} broken link(s), re-matched ${r.bidderCount} bidders (${r.needsReview} need review).`; status.style.color = 'var(--success)'; }
+      else { status.textContent = `🔴 ${r.error || 'Re-match failed'}`; status.style.color = 'var(--danger)'; }
+    }
+  } catch (e) {
+    if (status) { status.textContent = `🔴 Re-match failed: ${e.message}`; status.style.color = 'var(--danger)'; }
+  }
+  if (btn) { btn.disabled = false; btn.textContent = '🔁 Re-match Subcontractors'; }
+  if (status) delete status.dataset.transient;
+  bidderLinksAll = [];
   await renderBidCoverageTab();
   if (depthEnabled) await renderDepthLayer(true);
 }

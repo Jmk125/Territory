@@ -869,6 +869,26 @@ app.get('/api/bidder-links', async (req, res) => {
   });
 });
 
+// Clears any bidderLinks doc pointing at a location that no longer exists
+// (e.g. after a batch re-import replaced every location with a new _id) and
+// re-runs the matching cascade for everything that's now unconfirmed. This
+// is the "force it to try matching again" button — plain re-running the
+// cascade wouldn't help on its own, since a confirmed-but-dangling link
+// still counts as confirmed and gets skipped. Registered ahead of the
+// `:bidderName` route below so "resync" isn't swallowed as a bidder name.
+app.post('/api/bidder-links/resync', async (req, res) => {
+  const validLocationIds = await new Promise(resolve => db.locations.find({}, (err, docs) => resolve(new Set((docs || []).map(l => l._id)))));
+  const links = await new Promise(resolve => db.bidderLinks.find({}, (err, docs) => resolve(docs || [])));
+  const dangling = links.filter(l => l.locationId && !validLocationIds.has(l.locationId));
+  await Promise.all(dangling.map(l => new Promise(resolve => db.bidderLinks.remove({ _id: l._id }, {}, () => resolve()))));
+
+  const observations = await getEffectiveObservations();
+  const bidders = await resolveBidderLinks(observations);
+  const needsReview = await countUnconfirmedBidders(observations);
+  await reDeriveIfPossible();
+  res.json({ ok: true, clearedDangling: dangling.length, bidderCount: bidders.length, needsReview });
+});
+
 app.post('/api/bidder-links/:bidderName', (req, res) => {
   const bidderName = req.params.bidderName;
   const locationId = req.body.locationId;
