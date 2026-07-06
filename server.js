@@ -765,8 +765,11 @@ async function fetchBidObservations(baseUrl) {
 }
 
 // ─── Division / bidder-division manual overrides ────────────────────
+// bidderName -> array of divisions (a bidder can legitimately bid across
+// several trades — e.g. a combined masonry/concrete sub — so the override
+// is a set, not a single replacement).
 function getBidderDivisionOverrideMap() {
-  return new Promise(resolve => db.bidderDivisionOverrides.find({}, (err, docs) => resolve(new Map((docs || []).map(d => [d.bidderName, d.division])))));
+  return new Promise(resolve => db.bidderDivisionOverrides.find({}, (err, docs) => resolve(new Map((docs || []).map(d => [d.bidderName, Array.isArray(d.divisions) ? d.divisions : (d.division ? [d.division] : [])])))));
 }
 function getDivisionNameOverrideMap() {
   return new Promise(resolve => db.divisionOverrides.find({}, (err, docs) => resolve(new Map((docs || []).map(d => [d.division, d.name])))));
@@ -837,9 +840,12 @@ async function getEffectiveObservations() {
       const t = o.project_date ? new Date(o.project_date).getTime() : NaN;
       return Number.isNaN(t) || t >= cutoff; // unparseable/missing date -> keep it, don't discard data we can't classify
     })
-    .map(o => {
+    .flatMap(o => {
       const forced = overrides.get(o.bidder);
-      return forced ? { ...o, csi_division: forced } : o;
+      if (!forced || !forced.length) return [o];
+      // A bid counts toward every division the bidder is overridden into —
+      // duplicate the observation per division rather than picking one.
+      return forced.map(division => ({ ...o, csi_division: division }));
     });
 }
 
@@ -914,7 +920,7 @@ app.get('/api/bidder-links', async (req, res) => {
     const info = infoByName.get(name) || { bidCount: 0, divisions: [], aliases: [] };
     return {
       bidderName: name, bidCount: info.bidCount, divisions: info.divisions,
-      divisionOverride: divisionOverrides.get(name) || null,
+      divisionOverrides: divisionOverrides.get(name) || [],
       locationId: link ? link.locationId : null,
       method: link ? link.method : null,
       confirmed: link ? !!link.confirmed : false
@@ -980,9 +986,10 @@ app.post('/api/bidder-links/bulk-confirm', async (req, res) => {
       { upsert: true }, () => resolve()
     ));
     updated++;
-    if (item.division) {
+    const divisions = Array.isArray(item.divisions) ? item.divisions.filter(Boolean) : (item.division ? [item.division] : []);
+    if (divisions.length) {
       await new Promise(resolve => db.bidderDivisionOverrides.update(
-        { bidderName }, { bidderName, division: item.division, updatedAt: Date.now() }, { upsert: true }, () => resolve()
+        { bidderName }, { bidderName, divisions, updatedAt: Date.now() }, { upsert: true }, () => resolve()
       ));
     }
   }
@@ -1054,8 +1061,9 @@ app.delete('/api/division-overrides/:code', async (req, res) => {
 });
 
 // ─── Per-bidder division reassignment ───────────────────────────────
-// Forces all of a bidder's observations into a specific division — for when
-// the Bid Database's csi_division tag is wrong or too coarse for them.
+// Forces a bidder's observations into a specific set of divisions — for when
+// the Bid Database's csi_division tag is wrong/too coarse, or the bidder
+// genuinely bids across multiple trades that should each count them.
 app.get('/api/bidder-division-overrides', (req, res) => {
   db.bidderDivisionOverrides.find({}, (err, docs) => {
     if (err) return res.status(500).json({ error: err.message });
@@ -1064,9 +1072,11 @@ app.get('/api/bidder-division-overrides', (req, res) => {
 });
 app.post('/api/bidder-division-overrides/:bidderName', async (req, res) => {
   const bidderName = req.params.bidderName;
-  const division = String(req.body.division || '').trim();
-  if (!division) return res.status(400).json({ error: 'division required' });
-  db.bidderDivisionOverrides.update({ bidderName }, { bidderName, division, updatedAt: Date.now() }, { upsert: true }, async (err) => {
+  const divisions = Array.isArray(req.body.divisions)
+    ? [...new Set(req.body.divisions.map(d => String(d || '').trim()).filter(Boolean))]
+    : (req.body.division ? [String(req.body.division).trim()] : []);
+  if (!divisions.length) return res.status(400).json({ error: 'divisions required' });
+  db.bidderDivisionOverrides.update({ bidderName }, { bidderName, divisions, updatedAt: Date.now() }, { upsert: true }, async (err) => {
     if (err) return res.status(500).json({ error: err.message });
     await reDeriveIfPossible();
     res.json({ ok: true });
@@ -1565,9 +1575,19 @@ app.post('/api/map-tabs', (req, res) => {
 });
 
 app.put('/api/map-tabs/:id', (req, res) => {
-  const { name } = req.body;
-  if (!name || !name.trim()) return res.status(400).json({ error: 'name required' });
-  db.mapTabs.update({ _id: req.params.id, isDefault: { $ne: true } }, { $set: { name: name.trim() } }, {}, (err) => {
+  const { name, showCoverageDepth } = req.body;
+  const set = {};
+  // Renaming is restricted to non-default tabs (existing behavior); the
+  // coverage-depth visibility toggle is allowed on any tab, including Default,
+  // since clutter-avoidance applies there too.
+  if (name != null) {
+    if (!name.trim()) return res.status(400).json({ error: 'name required' });
+    set.name = name.trim();
+  }
+  if (showCoverageDepth != null) set.showCoverageDepth = !!showCoverageDepth;
+  if (!Object.keys(set).length) return res.status(400).json({ error: 'nothing to update' });
+  const filter = name != null ? { _id: req.params.id, isDefault: { $ne: true } } : { _id: req.params.id };
+  db.mapTabs.update(filter, { $set: set }, {}, (err) => {
     if (err) return res.status(500).json({ error: err.message });
     db.mapTabs.findOne({ _id: req.params.id }, (err2, doc) => res.json(doc));
   });

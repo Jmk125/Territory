@@ -270,6 +270,9 @@
     .bc-tag { display: inline-block; font-size: 0.65rem; padding: 1px 6px; border-radius: 8px; background: var(--surface2); color: var(--text2); margin-left: 4px; }
     .bc-tag.warn { color: var(--accent2); }
     .bc-tag.ok { color: var(--success); }
+    .bc-div-checks { display: flex; flex-wrap: wrap; gap: 1px 8px; max-width: 210px; max-height: 64px; overflow-y: auto; background: var(--surface2); border: 1px solid var(--border); border-radius: 6px; padding: 3px 6px; }
+    .bc-div-checks label { display: flex; align-items: center; gap: 2px; font-size: 0.7rem; white-space: nowrap; cursor: pointer; }
+    .bc-div-checks input[type=checkbox] { accent-color: var(--accent); margin: 0; }
     .legend-type { display: flex; flex-direction: column; }
     .legend-name { flex: 1; }
     .legend-filter-btn { background: none; border: none; color: var(--text2); cursor: pointer; padding: 2px 4px; border-radius: 4px; display: inline-flex; align-items: center; gap: 2px; }
@@ -602,6 +605,9 @@
     .config-tabs-bar .tab-pill.active { background: var(--accent); color: #fff; border-color: var(--accent); }
     .config-tabs-bar .tab-pill .pill-del { font-size: 0.7rem; opacity: 0.6; margin-left: 2px; }
     .config-tabs-bar .tab-pill .pill-del:hover { opacity: 1; color: var(--danger); }
+    .config-tabs-bar .tab-pill .pill-depth-toggle { font-size: 0.75rem; opacity: 0.35; margin-left: 2px; filter: grayscale(1); }
+    .config-tabs-bar .tab-pill .pill-depth-toggle.on { opacity: 1; filter: none; }
+    .config-tabs-bar .tab-pill .pill-depth-toggle:hover { opacity: 0.8; }
     .config-tabs-bar .tab-add-btn { padding: 5px 10px; border-radius: 16px; font-size: 0.78rem; cursor: pointer; border: 1px dashed var(--border); background: none; color: var(--text2); }
     .config-tabs-bar .tab-add-btn:hover { border-color: var(--accent); color: var(--accent); }
 
@@ -748,6 +754,7 @@
       <button class="measure-clear" id="measure-clear" onclick="clearMeasure()" style="display:none">Clear measurement</button>
     </div>
 
+    <div id="coverage-depth-section">
     <div class="section-divider" onclick="toggleBidcovSection(event, 'mapdepth')" style="cursor:pointer; display:flex; align-items:center; gap:4px;">
       <span class="bidcov-arrow" id="bidcov-arrow-mapdepth">▾</span> Coverage Depth
     </div>
@@ -774,6 +781,7 @@
       <label for="depth-enabled" style="cursor:pointer; font-size:0.8rem;">Show coverage-depth layer</label>
     </div>
     <div id="depth-legend" class="hint" style="margin-top:4px"></div>
+    </div>
     </div>
   </div>
 </div>
@@ -934,7 +942,9 @@ let selectedExclusivePoly = null;
 let infoToken = 0;
 let pinDropMode = false;
 let hidePins = false;   // hide location pins to see just the coverage blobs
+let hideBlobs = false;  // inverse — hide the coverage blobs to see just the pins
 let pinToggleBtn = null;
+let blobToggleBtn = null;
 let measureMode = false;
 let measurePoints = [];
 let bubbleToken = 0;
@@ -1150,8 +1160,10 @@ function initMap() {
   measureLayer = L.layerGroup().addTo(map);
 
   // A small button under the zoom control to hide/show the location pins so the
-  // coverage blobs can be viewed on their own. Restores its last state.
+  // coverage blobs can be viewed on their own (and its inverse, to hide the blobs
+  // and see just the pins). Restores last state for both.
   try { hidePins = localStorage.getItem('hidePins') === '1'; } catch (e) {}
+  try { hideBlobs = localStorage.getItem('hideBlobs') === '1'; } catch (e) {}
   const PinToggle = L.Control.extend({
     options: { position: 'topleft' },
     onAdd() {
@@ -1162,6 +1174,12 @@ function initMap() {
       a.title = hidePins ? 'Show location pins' : 'Hide location pins';
       pinToggleBtn = a;
       L.DomEvent.on(a, 'click', L.DomEvent.stop).on(a, 'click', toggleHidePins);
+      const b = L.DomUtil.create('a', hideBlobs ? 'active' : '', bar);
+      b.href = '#';
+      b.innerHTML = '🟢';
+      b.title = hideBlobs ? 'Show coverage blobs' : 'Hide coverage blobs';
+      blobToggleBtn = b;
+      L.DomEvent.on(b, 'click', L.DomEvent.stop).on(b, 'click', toggleHideBlobs);
       return bar;
     }
   });
@@ -1747,12 +1765,18 @@ function bcLocationSelectHtml(currentId, divisions, suggestion) {
   return html;
 }
 
-function bcDivisionSelectHtml(current, seenDivisions) {
+// Checkboxes rather than a single-select — a bidder can legitimately bid
+// across more than one division (e.g. a combined masonry/concrete sub), and
+// forcing a single override would silently drop them from the others.
+function bcDivisionCheckboxesHtml(currentArr, seenDivisions) {
   const divs = (coverageConfig && coverageConfig.config && coverageConfig.config.divisions) || {};
   const codes = [...new Set([...Object.keys(divs), ...(seenDivisions || [])])].sort();
-  let html = '<option value="">(no override)</option>';
-  html += codes.map(c => `<option value="${c}" ${c === current ? 'selected' : ''}>${c} ${escapeHtml((divs[c] && divs[c].name) || '')}</option>`).join('');
-  return html;
+  const current = new Set(currentArr || []);
+  if (!codes.length) return '<span class="hint">(no override)</span>';
+  return `<div class="bc-div-checks">${codes.map(c => `
+      <label title="${escapeHtml((divs[c] && divs[c].name) || '')}">
+        <input type="checkbox" value="${c}" ${current.has(c) ? 'checked' : ''}> ${c}
+      </label>`).join('')}</div>`;
 }
 
 // The actual division(s) this bidder's bids are tagged with in the Bid
@@ -1774,7 +1798,7 @@ async function renderBidderLinksTable() {
   const q = (document.getElementById('bc-links-filter')?.value || '').trim().toLowerCase();
   const divFilter = document.getElementById('bc-links-division-filter')?.value || '';
   let list = q ? bidderLinksAll.filter(b => b.bidderName.toLowerCase().includes(q)) : bidderLinksAll;
-  if (divFilter) list = list.filter(b => (b.divisionOverride || (b.divisions || [])[0]) === divFilter || (b.divisions || []).includes(divFilter));
+  if (divFilter) list = list.filter(b => (b.divisionOverrides || []).includes(divFilter) || (b.divisions || []).includes(divFilter));
   if (countEl) countEl.textContent = `(${bidderLinksAll.length} total, ${bidderLinksAll.filter(b => !b.confirmed).length} need review)`;
   if (!list.length) { host.innerHTML = '<span class="hint">Sync bid data to see bidders.</span>'; return; }
   host.innerHTML = `<table class="bc-table"><thead><tr>
@@ -1789,7 +1813,7 @@ async function renderBidderLinksTable() {
         <td>${b.bidCount}</td>
         <td>
           <div class="hint" style="margin-bottom:2px">${bcActualDivisionsLabel(b.divisions)}</div>
-          <select class="bc-link-division">${bcDivisionSelectHtml(b.divisionOverride, b.divisions)}</select>
+          ${bcDivisionCheckboxesHtml(b.divisionOverrides, b.divisions)}
         </td>
         <td><select class="bc-link-location">${bcLocationSelectHtml(b.locationId, b.divisions, b.suggestion)}</select></td>
         <td>${statusTag}</td>
@@ -1803,17 +1827,21 @@ async function renderBidderLinksTable() {
   </tbody></table>`;
 }
 
+function readDivisionCheckboxes(row) {
+  return [...row.querySelectorAll('.bc-div-checks input[type=checkbox]:checked')].map(cb => cb.value);
+}
+
 async function saveBidderLinkRow(btn) {
   const row = btn.closest('tr');
   const bidderName = row.dataset.bidder;
   const locationId = row.querySelector('.bc-link-location').value;
-  const division = row.querySelector('.bc-link-division').value;
+  const divisions = readDivisionCheckboxes(row);
   const tasks = [];
   if (locationId) tasks.push(fetch(`/api/bidder-links/${encodeURIComponent(bidderName)}`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ locationId })
   }));
-  if (division) tasks.push(fetch(`/api/bidder-division-overrides/${encodeURIComponent(bidderName)}`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ division })
+  if (divisions.length) tasks.push(fetch(`/api/bidder-division-overrides/${encodeURIComponent(bidderName)}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ divisions })
   }));
   else tasks.push(fetch(`/api/bidder-division-overrides/${encodeURIComponent(bidderName)}`, { method: 'DELETE' }));
   await Promise.all(tasks);
@@ -1851,8 +1879,8 @@ async function saveAllBidderLinks() {
     if (info && info.confirmed) continue;
     const locationId = row.querySelector('.bc-link-location')?.value;
     if (!locationId) continue;
-    const division = row.querySelector('.bc-link-division')?.value || undefined;
-    items.push({ bidderName, locationId, division });
+    const divisions = readDivisionCheckboxes(row);
+    items.push({ bidderName, locationId, divisions });
   }
   if (!items.length) { alert('Nothing to save — no unconfirmed rows here have a location selected.'); return; }
   if (!confirm(`Save ${items.length} bidder link(s)? This includes any pre-filled "guess" you haven't changed — Skip or fix any that look wrong first.`)) return;
@@ -2291,6 +2319,7 @@ async function loadData() {
   renderPins();
   renderProjectPins();
   renderProjectPinList();
+  updateCoverageDepthSectionVisibility();
   if (selectedTypeId) renderLocationsList();
 }
 
@@ -4375,6 +4404,17 @@ function toggleHidePins() {
   renderPins();
 }
 
+// Inverse of toggleHidePins — hide the coverage blobs so only the pins show.
+function toggleHideBlobs() {
+  hideBlobs = !hideBlobs;
+  try { localStorage.setItem('hideBlobs', hideBlobs ? '1' : ''); } catch (e) {}
+  if (blobToggleBtn) {
+    blobToggleBtn.classList.toggle('active', hideBlobs);
+    blobToggleBtn.title = hideBlobs ? 'Show coverage blobs' : 'Hide coverage blobs';
+  }
+  renderCoverage();
+}
+
 function renderPins() {
   pinLayer.clearLayers();
   if (hidePins) return;   // pins hidden — show only the coverage blobs
@@ -5246,6 +5286,7 @@ async function renderCoverage() {
   // fetches re-draw types the user just toggled off).
   const myToken = ++coverageToken;
   coverageLayer.clearLayers();
+  if (hideBlobs) { updateApproxNote([]); return; }   // blobs hidden — show only the pins
   const mode = document.querySelector('input[name="cov-mode"]:checked')?.value || 'merged';
   const showCombined = document.getElementById('show-combined')?.checked;
   updateCombinedSettingsUi();   // keep the merged/heat hint current
@@ -5351,6 +5392,18 @@ function switchMapTab(tabId) {
   renderPins();
   renderCoverage();
   renderBoundaryLayers();
+  updateCoverageDepthSectionVisibility();
+}
+
+// Some map tabs don't need the coverage-depth analytics at all (per-tab
+// opt-out set in Configure); default to visible when the field is unset so
+// existing tabs keep working exactly as before.
+function updateCoverageDepthSectionVisibility() {
+  const section = document.getElementById('coverage-depth-section');
+  if (!section) return;
+  const tab = mapTabs.find(t => t._id === activeMapTabId);
+  const show = !tab || tab.showCoverageDepth !== false;
+  section.style.display = show ? '' : 'none';
 }
 
 function renderConfigTabsBar() {
@@ -5359,8 +5412,22 @@ function renderConfigTabsBar() {
   bar.innerHTML = mapTabs.map(t => {
     const del = t.isDefault ? '' : `<span class="pill-del" onclick="event.stopPropagation(); deleteMapTab('${t._id}')" title="Delete tab">✕</span>`;
     const rename = t.isDefault ? '' : ` ondblclick="event.stopPropagation(); renameMapTab('${t._id}')"`;
-    return `<span class="tab-pill ${t._id === activeConfigTabId ? 'active' : ''}" onclick="switchConfigTab('${t._id}')"${rename} title="${t.isDefault ? '' : 'Double-click to rename'}">${escapeHtml(t.name)}${del}</span>`;
+    const depthOn = t.showCoverageDepth !== false;
+    const depthToggle = `<span class="pill-depth-toggle ${depthOn ? 'on' : ''}" onclick="event.stopPropagation(); toggleTabCoverageDepth('${t._id}')" title="${depthOn ? 'Coverage Depth panel shown on this tab — click to hide' : 'Coverage Depth panel hidden on this tab — click to show'}">🧮</span>`;
+    return `<span class="tab-pill ${t._id === activeConfigTabId ? 'active' : ''}" onclick="switchConfigTab('${t._id}')"${rename} title="${t.isDefault ? '' : 'Double-click to rename'}">${escapeHtml(t.name)}${depthToggle}${del}</span>`;
   }).join('') + `<button class="tab-add-btn" onclick="addMapTab()">+ Add Tab</button>`;
+}
+
+// Per-tab opt-out for the Coverage Depth panel — tabs that don't need the
+// bid-coverage analytics can hide it to stay uncluttered.
+async function toggleTabCoverageDepth(id) {
+  const tab = mapTabs.find(t => t._id === id);
+  if (!tab) return;
+  const next = !(tab.showCoverageDepth !== false);
+  await fetch(`/api/map-tabs/${id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ showCoverageDepth: next }) });
+  tab.showCoverageDepth = next;
+  renderConfigTabsBar();
+  updateCoverageDepthSectionVisibility();
 }
 
 function switchConfigTab(tabId) {
