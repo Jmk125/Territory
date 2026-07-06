@@ -2229,26 +2229,47 @@ function showDepthCellPopup(poly, cellId, divisions) {
 // Contour at the depth==target boundary — "a project inside this line can
 // expect a competitive bid event." Best-effort: any turf failure just skips
 // the line, the choropleth itself is the primary layer.
+// Balanced (tournament-bracket) union: merges pairs each round instead of
+// folding one shape at a time, so accumulated ring complexity stays roughly
+// even across merges instead of one polygon growing on every step. Needed
+// because the depth boundary can span thousands of hex cells — far more
+// than the handful of isochrone bubbles the existing unionAll() was built
+// for — and a linear fold there would be much slower.
+function unionManyBalanced(polys) {
+  let layer = polys;
+  while (layer.length > 1) {
+    const next = [];
+    for (let i = 0; i < layer.length; i += 2) {
+      if (i + 1 < layer.length) {
+        try { next.push(turf.union(layer[i], layer[i + 1])); } catch (e) { next.push(layer[i]); }
+      } else next.push(layer[i]);
+    }
+    layer = next;
+  }
+  return layer[0] || null;
+}
+
+// The boundary is the edge of "every selected division is at/above its
+// target here" — i.e. the outline of the union of all covered hex cells.
+// (An earlier version used turf.isolines/interpolate, built for smoothly
+// varying fields like elevation; coverage depth is a step function — it
+// jumps at each contractor's competitive/outer radius rather than varying
+// continuously — so marching-squares-style interpolation fragmented into
+// stray small loops instead of tracing the real edge, especially over a
+// large, mostly-covered area. Directly unioning the qualifying cells has no
+// such approximation.)
 function drawDepthContour(cellIds, divisions) {
-  if (cellIds.size < 4 || typeof turf.isolines !== 'function') return;
+  const coveredPolys = [];
+  for (const id of cellIds) {
+    if (depthCompositeAt(id, divisions) >= 1) {
+      coveredPolys.push(turf.polygon([h3.cellToBoundary(id, true)]));
+    }
+  }
+  if (!coveredPolys.length || coveredPolys.length === cellIds.size) return; // nothing covered, or everything covered (no boundary to draw)
   try {
-    const points = [];
-    for (const id of cellIds) {
-      const [lat, lng] = h3.cellToLatLng(id);
-      points.push(turf.point([lng, lat], { depth: depthCompositeAt(id, divisions) }));
-    }
-    const fc = turf.featureCollection(points);
-    const interpolated = turf.interpolate(fc, 3, { gridType: 'points', property: 'depth', units: 'kilometers' });
-    // turf.isolines treats the first break as a reference floor and only
-    // emits a line for subsequent breaks, so the real threshold (1.0) must
-    // be second, preceded by a value below the grid's minimum.
-    const minVal = Math.min(...interpolated.features.map(f => f.properties.depth), 1) - 1;
-    const lines = turf.isolines(interpolated, [minVal, 1.0], { zProperty: 'depth' });
-    const target = lines && lines.features ? lines.features.filter(f => f.properties.depth === 1.0) : [];
-    if (target.length) {
-      L.geoJSON(turf.featureCollection(target), { style: { color: '#ffffff', weight: 2.5, dashArray: '5,4', fillOpacity: 0 } }).addTo(depthLayer);
-    }
-  } catch (e) { /* contour is a nice-to-have; the choropleth still renders */ }
+    const merged = unionManyBalanced(coveredPolys);
+    if (merged) L.geoJSON(merged, { style: { color: '#ffffff', weight: 2.5, dashArray: '5,4', fill: false } }).addTo(depthLayer);
+  } catch (e) { /* boundary is a nice-to-have; the choropleth still renders */ }
 }
 
 // ══════════════════════════════════
