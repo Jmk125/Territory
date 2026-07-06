@@ -843,6 +843,34 @@
     </div>
 
     <div class="bidcov-section">
+      <div class="bidcov-section-header" onclick="toggleBidcovSection(event, 'thresholds')" style="cursor:pointer">
+        <h3><span class="bidcov-arrow" id="bidcov-arrow-thresholds">▸</span> Derivation Thresholds</h3>
+        <span class="hint">The judgment-call numbers in the whole procedure — everything else is derived from your bid data.</span>
+      </div>
+      <div class="bidcov-section-body" id="bidcov-body-thresholds" style="display:none">
+        <div class="row" style="gap:6px; align-items:center">
+          <label class="field-label" style="margin-bottom:0; width:260px">A band counts as "competitive" when cumulative median deviation ≤</label>
+          <input type="number" id="bc-thresh-competitive" step="0.1" style="width:64px" oninput="this.dataset.dirty='1'">
+          <span class="hint">%</span>
+        </div>
+        <div class="row" style="gap:6px; align-items:center; margin-top:8px">
+          <label class="field-label" style="margin-bottom:0; width:260px">Beyond the outer radius, median deviation exceeds</label>
+          <input type="number" id="bc-thresh-outerdev" step="0.1" style="width:64px" oninput="this.dataset.dirty='1'">
+          <span class="hint">%</span>
+        </div>
+        <div class="row" style="gap:6px; align-items:center; margin-top:8px">
+          <label class="field-label" style="margin-bottom:0; width:260px">...or beyond the outer radius, win rate drops below</label>
+          <input type="number" id="bc-thresh-outerwin" step="0.5" style="width:64px" oninput="this.dataset.dirty='1'">
+          <span class="hint">%</span>
+        </div>
+        <div class="row" style="gap:6px; margin-top:10px">
+          <button class="btn btn-ghost btn-sm" onclick="saveDerivationThresholds()">Apply &amp; re-derive</button>
+          <span id="bc-thresholds-status" class="hint"></span>
+        </div>
+      </div>
+    </div>
+
+    <div class="bidcov-section">
       <div class="bidcov-section-header" onclick="toggleBidcovSection(event, 'divisions')" style="cursor:pointer">
         <h3><span class="bidcov-arrow" id="bidcov-arrow-divisions">▸</span> Divisions</h3>
         <span class="hint">Rename a division's display label or set its target bidder count — both persist across syncs.</span>
@@ -1502,8 +1530,20 @@ async function renderBidCoverageTab() {
   if (recencyInput && !recencyInput.dataset.dirty) {
     try { const r = await fetch('/api/bid-recency').then(r => r.json()); recencyInput.value = r.years || ''; } catch (e) {}
   }
+  const compInput = document.getElementById('bc-thresh-competitive');
+  const outerDevInput = document.getElementById('bc-thresh-outerdev');
+  const outerWinInput = document.getElementById('bc-thresh-outerwin');
+  if ((compInput && !compInput.dataset.dirty) || (outerDevInput && !outerDevInput.dataset.dirty) || (outerWinInput && !outerWinInput.dataset.dirty)) {
+    try {
+      const t = await fetch('/api/derivation-thresholds').then(r => r.json());
+      if (compInput && !compInput.dataset.dirty) compInput.value = t.competitiveDevPct;
+      if (outerDevInput && !outerDevInput.dataset.dirty) outerDevInput.value = t.outerDevPct;
+      if (outerWinInput && !outerWinInput.dataset.dirty) outerWinInput.value = t.outerWinRatePct;
+    } catch (e) {}
+  }
   restoreBidcovSectionState('divisions', true);
   restoreBidcovSectionState('links', true);
+  restoreBidcovSectionState('thresholds', true);
   populateBidcovDivisionFilters();
   renderDivisionsTable();
   await renderBidderLinksTable();
@@ -1555,6 +1595,30 @@ async function saveBidRecency() {
   if (input) delete input.dataset.dirty;
   const status = document.getElementById('bc-sync-status');
   if (status) { status.textContent = years ? `🟢 Now using bids from the last ${years} year(s) only.` : '🟢 Now using all bid history.'; status.style.color = 'var(--success)'; }
+  await renderBidCoverageTab();
+  if (depthEnabled) await renderDepthLayer(true);
+}
+
+async function saveDerivationThresholds() {
+  const compInput = document.getElementById('bc-thresh-competitive');
+  const outerDevInput = document.getElementById('bc-thresh-outerdev');
+  const outerWinInput = document.getElementById('bc-thresh-outerwin');
+  const status = document.getElementById('bc-thresholds-status');
+  const body = {
+    competitiveDevPct: Number(compInput.value),
+    outerDevPct: Number(outerDevInput.value),
+    outerWinRatePct: Number(outerWinInput.value)
+  };
+  if (Object.values(body).some(v => !Number.isFinite(v))) {
+    if (status) { status.textContent = 'All three fields must be numbers.'; status.style.color = 'var(--danger)'; }
+    return;
+  }
+  const r = await fetch('/api/derivation-thresholds', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+  }).then(r => r.json());
+  if (!r.ok) { if (status) { status.textContent = r.error || 'Failed to save.'; status.style.color = 'var(--danger)'; } return; }
+  [compInput, outerDevInput, outerWinInput].forEach(i => delete i.dataset.dirty);
+  if (status) { status.textContent = '🟢 Re-derived with the new thresholds.'; status.style.color = 'var(--success)'; }
   await renderBidCoverageTab();
   if (depthEnabled) await renderDepthLayer(true);
 }

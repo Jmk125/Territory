@@ -791,6 +791,40 @@ app.post('/api/bid-recency', async (req, res) => {
   });
 });
 
+// The only judgment-call numbers in the whole derivation procedure — how far
+// "at/below median" (competitive) and "unreliable insurance number" (outer)
+// actually mean — exposed as a tunable setting instead of buried constants.
+const DERIVATION_THRESHOLDS_KEY = 'derivationThresholds';
+function getDerivationThresholds() {
+  return new Promise(resolve => db.settings.findOne({ key: DERIVATION_THRESHOLDS_KEY }, (err, doc) => {
+    const d = coverageDerivation.DEFAULT_THRESHOLDS;
+    if (!doc) return resolve({ ...d });
+    resolve({
+      competitiveDevPct: Number.isFinite(doc.competitiveDevPct) ? doc.competitiveDevPct : d.competitiveDevPct,
+      outerDevPct: Number.isFinite(doc.outerDevPct) ? doc.outerDevPct : d.outerDevPct,
+      outerWinRate: Number.isFinite(doc.outerWinRate) ? doc.outerWinRate : d.outerWinRate
+    });
+  }));
+}
+app.get('/api/derivation-thresholds', async (req, res) => {
+  const t = await getDerivationThresholds();
+  res.json({ competitiveDevPct: t.competitiveDevPct, outerDevPct: t.outerDevPct, outerWinRatePct: Math.round(t.outerWinRate * 1000) / 10 });
+});
+app.post('/api/derivation-thresholds', async (req, res) => {
+  const competitiveDevPct = Number(req.body.competitiveDevPct);
+  const outerDevPct = Number(req.body.outerDevPct);
+  const outerWinRatePct = Number(req.body.outerWinRatePct);
+  if (![competitiveDevPct, outerDevPct, outerWinRatePct].every(Number.isFinite)) {
+    return res.status(400).json({ error: 'competitiveDevPct, outerDevPct, and outerWinRatePct must all be numbers' });
+  }
+  const doc = { key: DERIVATION_THRESHOLDS_KEY, competitiveDevPct, outerDevPct, outerWinRate: outerWinRatePct / 100 };
+  db.settings.update({ key: DERIVATION_THRESHOLDS_KEY }, { $set: doc }, { upsert: true }, async (err) => {
+    if (err) return res.status(500).json({ error: err.message });
+    await reDeriveIfPossible();
+    res.json({ ok: true, competitiveDevPct, outerDevPct, outerWinRatePct });
+  });
+});
+
 async function getEffectiveObservations() {
   const cache = await getCachedObservations();
   if (!cache) return [];
@@ -1206,8 +1240,9 @@ async function runDerivation(observations) {
   const manualOverrides = await getManualOverrides();
   const previous = await getCoverageConfigDoc();
   const previousConfig = previous ? previous.config : BUNDLED_CONFIG;
+  const thresholds = await getDerivationThresholds();
 
-  const derived = coverageDerivation.deriveConfig({ observations: joined, divisionNames, manualOverrides, previousConfig });
+  const derived = coverageDerivation.deriveConfig({ observations: joined, divisionNames, manualOverrides, previousConfig, thresholds });
   await new Promise(resolve => db.coverageConfig.update({ _id: 'latest' }, { _id: 'latest', config: derived, savedAt: Date.now() }, { upsert: true }, () => resolve()));
   await new Promise(resolve => db.coverageDepthCache.remove({}, { multi: true }, () => resolve()));
   return derived;
@@ -1420,6 +1455,7 @@ app.get('/api/bidder-audit/:bidderName', async (req, res) => {
   const config = configDoc ? configDoc.config : BUNDLED_CONFIG;
   const overrides = (config && config.bidder_overrides) || {};
   const ov = overrides[bidderName] || null;
+  const thresholds = await getDerivationThresholds();
 
   const allObservations = await getEffectiveObservations();
   const bidderObservations = allObservations.filter(o => o.bidder === bidderName);
@@ -1439,8 +1475,8 @@ app.get('/api/bidder-audit/:bidderName', async (req, res) => {
     const scoped = ov && (!ov.division || ov.division === code) ? ov : null;
 
     const miBands = coverageDerivation.computeBandStats(usable, coverageDerivation.MILE_EDGES, 'miles');
-    const ownCompetitive = coverageDerivation.findCompetitiveRadius(usable, coverageDerivation.MILE_EDGES, 'miles');
-    const ownOuter = coverageDerivation.findOuterRadius(usable, coverageDerivation.MILE_EDGES, 'miles');
+    const ownCompetitive = coverageDerivation.findCompetitiveRadius(usable, coverageDerivation.MILE_EDGES, 'miles', thresholds.competitiveDevPct);
+    const ownOuter = coverageDerivation.findOuterRadius(usable, coverageDerivation.MILE_EDGES, 'miles', thresholds.outerDevPct, thresholds.outerWinRate);
 
     divisions[code] = {
       name: (divCfg && divCfg.name) || code,
