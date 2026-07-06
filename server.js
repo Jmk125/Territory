@@ -39,7 +39,13 @@ const db = {
   // Manual per-bidder overrides; merged over auto-derived flags (manual wins).
   bidderOverrides: new Datastore({ filename: path.join(__dirname, 'data/bidderOverrides.db'), autoload: true }),
   // Precomputed H3 coverage-depth cells, cached per division+resolution.
-  coverageDepthCache: new Datastore({ filename: path.join(__dirname, 'data/coverageDepthCache.db'), autoload: true })
+  coverageDepthCache: new Datastore({ filename: path.join(__dirname, 'data/coverageDepthCache.db'), autoload: true }),
+  // Manual display-name overrides for a CSI division (independent of any
+  // Territory location-type naming).
+  divisionOverrides: new Datastore({ filename: path.join(__dirname, 'data/divisionOverrides.db'), autoload: true }),
+  // Forces a bidder's observations into a specific division, for cases where
+  // the Bid Database's csi_division tag is wrong/too coarse for that bidder.
+  bidderDivisionOverrides: new Datastore({ filename: path.join(__dirname, 'data/bidderDivisionOverrides.db'), autoload: true })
 };
 
 app.use(express.json({ limit: '50mb' }));
@@ -758,6 +764,39 @@ async function fetchBidObservations(baseUrl) {
   return data;
 }
 
+// ─── Division / bidder-division manual overrides ────────────────────
+function getBidderDivisionOverrideMap() {
+  return new Promise(resolve => db.bidderDivisionOverrides.find({}, (err, docs) => resolve(new Map((docs || []).map(d => [d.bidderName, d.division])))));
+}
+function getDivisionNameOverrideMap() {
+  return new Promise(resolve => db.divisionOverrides.find({}, (err, docs) => resolve(new Map((docs || []).map(d => [d.division, d.name])))));
+}
+
+// The cached observations, with any manual bidder->division reassignment
+// applied. This is the single point where that override takes effect, so
+// every consumer (derivation, coverage-depth grouping, the link review list)
+// stays consistent with each other.
+async function getEffectiveObservations() {
+  const cache = await getCachedObservations();
+  if (!cache) return [];
+  const overrides = await getBidderDivisionOverrideMap();
+  if (!overrides.size) return cache.observations;
+  return cache.observations.map(o => {
+    const forced = overrides.get(o.bidder);
+    return forced ? { ...o, csi_division: forced } : o;
+  });
+}
+
+// Re-run derivation off the current observations cache (if any) — used
+// after any override change so the effect is visible immediately rather
+// than waiting for the next Bid Database sync.
+async function reDeriveIfPossible() {
+  const cache = await getCachedObservations();
+  if (!cache) return;
+  const effective = await getEffectiveObservations();
+  await runDerivation(effective).catch(e => console.warn('Re-derivation after override change failed:', e.message));
+}
+
 // Distinct bidders across the observation set, with aliases/bid counts/
 // divisions merged — the unit the entity-resolution cascade operates on.
 function distinctBidders(observations) {
@@ -801,28 +840,31 @@ async function countUnconfirmedBidders(observations) {
   return bidders.filter(b => { const l = links.get(b.bidderName); return !l || !l.confirmed; }).length;
 }
 
-// Review panel: every bidder without a confirmed link, sorted by bid volume
-// so the highest-impact names surface first (acceptance: any bidder with
-// >=4 bids must show up here — trivially true since nothing is filtered out).
+// Review panel: by default, every bidder without a confirmed link, sorted by
+// bid volume so the highest-impact names surface first (acceptance: any
+// bidder with >=4 bids must show up here — trivially true since nothing is
+// filtered out). Pass ?all=true for the full roster (management view).
 app.get('/api/bidder-links', async (req, res) => {
-  const cache = await getCachedObservations();
-  const observations = cache ? cache.observations : [];
+  const observations = await getEffectiveObservations();
   const bidders = distinctBidders(observations);
   const infoByName = new Map(bidders.map(b => [b.bidderName, { bidCount: b.bidCount, divisions: b.divisions }]));
+  const divisionOverrides = await getBidderDivisionOverrideMap();
   db.bidderLinks.find({}, (err, links) => {
     if (err) return res.status(500).json({ error: err.message });
     const byName = new Map(links.map(l => [l.bidderName, l]));
     const names = new Set([...infoByName.keys(), ...byName.keys()]);
-    const out = [...names].map(name => {
+    let out = [...names].map(name => {
       const link = byName.get(name);
       const info = infoByName.get(name) || { bidCount: 0, divisions: [] };
       return {
         bidderName: name, bidCount: info.bidCount, divisions: info.divisions,
+        divisionOverride: divisionOverrides.get(name) || null,
         locationId: link ? link.locationId : null,
         method: link ? link.method : null,
         confirmed: link ? !!link.confirmed : false
       };
-    }).filter(b => !b.confirmed).sort((a, b) => b.bidCount - a.bidCount);
+    }).sort((a, b) => b.bidCount - a.bidCount);
+    if (req.query.all !== 'true') out = out.filter(b => !b.confirmed);
     res.json(out);
   });
 });
@@ -853,6 +895,67 @@ app.post('/api/bidder-links/:bidderName/skip', (req, res) => {
       res.json({ ok: true });
     }
   );
+});
+
+// Puts a bidder back into "unlinked, never reviewed" state — the entity
+// resolution cascade will re-attempt matching it on the next sync.
+app.post('/api/bidder-links/:bidderName/unlink', (req, res) => {
+  db.bidderLinks.remove({ bidderName: req.params.bidderName }, {}, (err) => {
+    if (err) return res.status(500).json({ error: err.message });
+    db.coverageDepthCache.remove({}, { multi: true }, () => res.json({ ok: true }));
+  });
+});
+
+// ─── Division display-name overrides ────────────────────────────────
+app.get('/api/division-overrides', (req, res) => {
+  db.divisionOverrides.find({}, (err, docs) => {
+    if (err) return res.status(500).json({ error: err.message });
+    res.json(docs || []);
+  });
+});
+app.post('/api/division-overrides/:code', async (req, res) => {
+  const division = req.params.code;
+  const name = String(req.body.name || '').trim();
+  if (!name) return res.status(400).json({ error: 'name required' });
+  db.divisionOverrides.update({ division }, { division, name, updatedAt: Date.now() }, { upsert: true }, async (err) => {
+    if (err) return res.status(500).json({ error: err.message });
+    await reDeriveIfPossible();
+    res.json({ ok: true });
+  });
+});
+app.delete('/api/division-overrides/:code', async (req, res) => {
+  db.divisionOverrides.remove({ division: req.params.code }, {}, async (err) => {
+    if (err) return res.status(500).json({ error: err.message });
+    await reDeriveIfPossible();
+    res.json({ ok: true });
+  });
+});
+
+// ─── Per-bidder division reassignment ───────────────────────────────
+// Forces all of a bidder's observations into a specific division — for when
+// the Bid Database's csi_division tag is wrong or too coarse for them.
+app.get('/api/bidder-division-overrides', (req, res) => {
+  db.bidderDivisionOverrides.find({}, (err, docs) => {
+    if (err) return res.status(500).json({ error: err.message });
+    res.json(docs || []);
+  });
+});
+app.post('/api/bidder-division-overrides/:bidderName', async (req, res) => {
+  const bidderName = req.params.bidderName;
+  const division = String(req.body.division || '').trim();
+  if (!division) return res.status(400).json({ error: 'division required' });
+  db.bidderDivisionOverrides.update({ bidderName }, { bidderName, division, updatedAt: Date.now() }, { upsert: true }, async (err) => {
+    if (err) return res.status(500).json({ error: err.message });
+    await reDeriveIfPossible();
+    res.json({ ok: true });
+  });
+});
+app.delete('/api/bidder-division-overrides/:bidderName', async (req, res) => {
+  db.bidderDivisionOverrides.remove({ bidderName: req.params.bidderName }, {}, async (err) => {
+    if (err) return res.status(500).json({ error: err.message });
+    await reDeriveIfPossible();
+    res.json({ ok: true });
+  });
 });
 
 // ─── 2b. Project geocoding cache ────────────────────────────────────
@@ -1008,7 +1111,10 @@ async function runDerivation(observations) {
     .filter(o => o.miles != null && o.minutes != null && o.dev_pct != null)
     .map(o => ({ csi_division: o.csi_division, bidderName: o.bidder, dev_pct: o.dev_pct, won: !!o.won, miles: o.miles, minutes: o.minutes, basis: o.basis }));
 
-  const divisionNames = await buildDivisionNamesFromTypes();
+  const typeNames = await buildDivisionNamesFromTypes();
+  const nameOverrides = await getDivisionNameOverrideMap();
+  const divisionNames = { ...typeNames };
+  for (const [code, name] of nameOverrides.entries()) divisionNames[code] = name; // manual wins
   const manualOverrides = await getManualOverrides();
   const previous = await getCoverageConfigDoc();
   const previousConfig = previous ? previous.config : BUNDLED_CONFIG;
@@ -1033,17 +1139,33 @@ app.post('/api/coverage-overrides/:bidderName', async (req, res) => {
   delete body._id; delete body.bidderName;
   db.bidderOverrides.update({ bidderName }, { bidderName, ...body, updatedAt: Date.now() }, { upsert: true }, async (err) => {
     if (err) return res.status(500).json({ error: err.message });
-    const cache = await getCachedObservations();
-    if (cache) await runDerivation(cache.observations).catch(e => console.warn('Re-derivation after override change failed:', e.message));
+    await reDeriveIfPossible();
     res.json({ ok: true });
   });
 });
 app.delete('/api/coverage-overrides/:bidderName', async (req, res) => {
   db.bidderOverrides.remove({ bidderName: req.params.bidderName }, {}, async (err) => {
     if (err) return res.status(500).json({ error: err.message });
-    const cache = await getCachedObservations();
-    if (cache) await runDerivation(cache.observations).catch(e => console.warn('Re-derivation after override change failed:', e.message));
+    await reDeriveIfPossible();
     res.json({ ok: true });
+  });
+});
+
+// Direct patch for target_bidders — this isn't derived from bid data (it's a
+// staffing/business choice), so it edits the persisted config in place
+// rather than requiring a full re-derivation.
+app.post('/api/coverage-config/target-bidders/:division', async (req, res) => {
+  const division = req.params.division;
+  const target = parseInt(req.body.target_bidders, 10);
+  if (!(target > 0)) return res.status(400).json({ error: 'target_bidders must be a positive integer' });
+  const doc = await getCoverageConfigDoc();
+  if (!doc || !doc.config || !doc.config.divisions[division]) {
+    return res.status(404).json({ error: 'No live config for this division yet — run a bid-data sync first.' });
+  }
+  doc.config.divisions[division].target_bidders = target;
+  db.coverageConfig.update({ _id: 'latest' }, { _id: 'latest', config: doc.config, savedAt: doc.savedAt }, { upsert: true }, (err) => {
+    if (err) return res.status(500).json({ error: err.message });
+    db.coverageDepthCache.remove({}, { multi: true }, () => res.json({ ok: true, target_bidders: target }));
   });
 });
 
@@ -1088,37 +1210,59 @@ app.get('/api/coverage-depth', async (req, res) => {
   const resolution = clampNum(req.query.resolution, 5, 9, 7);
   const divisions = String(req.query.divisions || '').split(',').map(s => s.trim()).filter(Boolean);
   if (!divisions.length) return res.status(400).json({ error: 'divisions query param required (comma-separated CSI codes)' });
+  let padOverride = null;
+  if (req.query.padMiles != null && req.query.padMiles !== '') {
+    const v = Number(req.query.padMiles);
+    if (Number.isFinite(v)) padOverride = Math.min(150, Math.max(5, v));
+  }
 
   const configDoc = await getCoverageConfigDoc();
   const config = configDoc ? configDoc.config : BUNDLED_CONFIG;
   if (!config) return res.status(503).json({ error: 'No coverage config available yet — run a bid-data sync first.' });
 
-  const cacheDoc = await getCachedObservations();
-  const observations = cacheDoc ? cacheDoc.observations : [];
+  const observations = await getEffectiveObservations();
 
   const out = { resolution, divisions: {} };
   for (const division of divisions) {
     const divCfg = config.divisions[division];
     if (!divCfg || divCfg.always_covered) { out.divisions[division] = { alwaysCovered: true }; continue; }
 
-    const cached = await new Promise(resolve => db.coverageDepthCache.findOne({ _id: `${division}:${resolution}` }, (err, doc) => resolve(doc)));
-    if (cached) { out.divisions[division] = { cells: cached.cells, computedAt: cached.computedAt }; continue; }
-
     const bidders = await getBiddersForDivision(division, config, observations);
     if (!bidders.length) { out.divisions[division] = { cells: {}, computedAt: Date.now(), note: 'No linked subs with bid history in this division yet.' }; continue; }
+
+    // Default grid extent scales with how far this division's coverage can
+    // actually reach — otherwise a wide outer radius gets clipped by the
+    // grid edge and reads as "fully covered" right up to the border.
+    let maxOuterMi = divCfg.outer_radius_mi || 60;
+    for (const b of bidders) if (b.outerRadiusMi != null) maxOuterMi = Math.max(maxOuterMi, b.outerRadiusMi);
+    const padMiles = padOverride != null ? padOverride : maxOuterMi + 15;
 
     const projLocs = await new Promise(resolve => db.projectLocations.find({ lat: { $ne: null } }, (err, docs) => resolve(docs || [])));
     const allPoints = [...bidders.map(b => ({ lat: b.lat, lng: b.lng })), ...projLocs.map(p => ({ lat: p.lat, lng: p.lng }))];
 
-    const cells = coverageDepthLib.buildHexGrid(allPoints, resolution);
-    if (cells.length > MAX_HEX_CELLS) {
-      return res.status(400).json({ error: `Grid too large (${cells.length} cells) at resolution ${resolution} for this market's extent — try a coarser (lower) resolution.` });
+    // A wide auto-pad (to cover a large outer radius) can outgrow the cell
+    // cap at the requested resolution — degrade to a coarser resolution
+    // automatically rather than failing outright; only error if even the
+    // coarsest resolution is still too large for this market's extent.
+    let usedResolution = resolution;
+    let cells = coverageDepthLib.buildHexGrid(allPoints, usedResolution, padMiles);
+    while (cells.length > MAX_HEX_CELLS && usedResolution > 4) {
+      usedResolution -= 1;
+      cells = coverageDepthLib.buildHexGrid(allPoints, usedResolution, padMiles);
     }
+    if (cells.length > MAX_HEX_CELLS) {
+      return res.status(400).json({ error: `Grid too large (${cells.length} cells) even at the coarsest resolution for ${Math.round(padMiles)}mi padding — try a smaller grid extent.` });
+    }
+
+    const cacheId = `${division}:${usedResolution}:${Math.round(padMiles)}`;
+    const cached = await new Promise(resolve => db.coverageDepthCache.findOne({ _id: cacheId }, (err, doc) => resolve(doc)));
+    if (cached) { out.divisions[division] = { cells: cached.cells, computedAt: cached.computedAt, padMiles, resolution: usedResolution }; continue; }
+
     const depths = coverageDepthLib.computeDivisionDepth(cells, bidders, divCfg);
     await new Promise(resolve => db.coverageDepthCache.update(
-      { _id: `${division}:${resolution}` }, { _id: `${division}:${resolution}`, cells: depths, computedAt: Date.now() }, { upsert: true }, () => resolve()
+      { _id: cacheId }, { _id: cacheId, cells: depths, computedAt: Date.now() }, { upsert: true }, () => resolve()
     ));
-    out.divisions[division] = { cells: depths, computedAt: Date.now() };
+    out.divisions[division] = { cells: depths, computedAt: Date.now(), padMiles, resolution: usedResolution };
   }
   res.json(out);
 });
@@ -1129,7 +1273,8 @@ async function runFullSync(baseUrl) {
   await saveCachedObservations(payload);
   const bidders = await resolveBidderLinks(payload.observations);
   await syncProjectLocations(payload.observations);
-  const derived = await runDerivation(payload.observations);
+  const effective = await getEffectiveObservations();
+  const derived = await runDerivation(effective);
   const needsReview = await countUnconfirmedBidders(payload.observations);
   return { observationCount: payload.observations.length, bidderCount: bidders.length, needsReview, generatedAt: derived.meta.generated };
 }

@@ -8,4 +8,6 @@ data/bidderOverrides.db
 data/coverageConfig.db
 data/coverageDepthCache.db
 data/projectLocations.db
+data/divisionOverrides.db
+data/bidderDivisionOverrides.db
 .env
