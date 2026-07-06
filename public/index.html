@@ -235,6 +235,13 @@
     .depth-div-row input[type=checkbox] { accent-color: var(--accent); flex-shrink: 0; }
     .depth-div-row .depth-div-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .depth-div-row .depth-target-input { width: 44px; background: var(--surface2); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-size: 0.75rem; padding: 2px 4px; }
+    .depth-div-expand { background: none; border: none; color: var(--text2); cursor: pointer; padding: 0 2px; font-size: 0.8rem; flex-shrink: 0; width: 1em; }
+    .depth-div-expand:hover { color: var(--accent); }
+    .depth-contractor-list { margin: 2px 0 8px 24px; padding: 6px 8px; border-left: 2px solid var(--border); display: flex; flex-direction: column; gap: 4px; }
+    .depth-contractor-actions { display: flex; align-items: center; gap: 6px; margin-bottom: 2px; }
+    .depth-contractor-row { display: flex; align-items: center; gap: 6px; font-size: 0.76rem; cursor: pointer; }
+    .depth-contractor-row input[type=checkbox] { accent-color: var(--accent); flex-shrink: 0; }
+    .depth-contractor-row span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .depth-legend-swatches { display: flex; align-items: center; gap: 4px; margin-top: 4px; }
     .depth-legend-swatches span { display: inline-block; width: 14px; height: 10px; border-radius: 2px; }
     .link-review-row { display: flex; align-items: center; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--border); }
@@ -741,7 +748,10 @@
       <button class="measure-clear" id="measure-clear" onclick="clearMeasure()" style="display:none">Clear measurement</button>
     </div>
 
-    <div class="section-divider">Coverage Depth</div>
+    <div class="section-divider" onclick="toggleBidcovSection(event, 'mapdepth')" style="cursor:pointer; display:flex; align-items:center; gap:4px;">
+      <span class="bidcov-arrow" id="bidcov-arrow-mapdepth">▾</span> Coverage Depth
+    </div>
+    <div id="bidcov-body-mapdepth">
     <div class="bidcov-status-row">
       <span id="bidcov-badge" class="badge-ors fallback">⚪ No live data</span>
       <button class="btn btn-ghost btn-sm" onclick="switchTab('bidcoverage')" style="margin-left:auto">Manage →</button>
@@ -764,6 +774,7 @@
       <label for="depth-enabled" style="cursor:pointer; font-size:0.8rem;">Show coverage-depth layer</label>
     </div>
     <div id="depth-legend" class="hint" style="margin-top:4px"></div>
+    </div>
   </div>
 </div>
 
@@ -975,6 +986,7 @@ async function init() {
   hasOrsKey = cfg.hasOrsKey;
   await refreshOrsStatus();
   await refreshBidCovStatus();
+  restoreBidcovSectionState('mapdepth', false); // expanded by default, unlike the Bid Coverage tab's tables
 
   // Apply splash color theme as CSS variables on the splash element
   if (cfg.splashColor) {
@@ -1436,12 +1448,15 @@ let depthTargets = {};           // division -> target bidder count (editable)
 let depthRule = 'min';
 let depthEnabled = false;
 let depthData = null;            // last /api/coverage-depth response
+let depthExcludedBidders = new Set(); // bidder names excluded from the depth calc
+let depthExpandedDivisions = new Set(); // which division rows show their contractor list
+let mapPaneLinkedContractors = null;    // cached /api/linked-contractors, for the expandable lists
 
 async function refreshBidCovStatus() {
   try { bidDbSettings = await fetch('/api/bid-db-settings').then(r => r.json()); } catch (e) { bidDbSettings = null; }
   try { coverageConfig = await fetch('/api/coverage-config').then(r => r.json()); } catch (e) { coverageConfig = null; }
   updateBidCovBadge();
-  renderDepthDivisionList();
+  await renderDepthDivisionList();
 }
 
 function updateBidCovBadge() {
@@ -1954,24 +1969,69 @@ async function deleteOverrideRow(btn) {
 }
 
 // ── Coverage-depth layer ─────────────────────────────────────────
-function renderDepthDivisionList() {
+async function renderDepthDivisionList() {
   const host = document.getElementById('depth-division-list');
   if (!host) return;
   const divs = coverageConfig && coverageConfig.config && coverageConfig.config.divisions;
-  if (!divs) { host.innerHTML = '<span class="hint">Sync bid data to see divisions</span>'; return; }
+  if (!divs) { host.innerHTML = '<span class="hint">Sync bid data (Bid Coverage tab) to see divisions</span>'; return; }
   const codes = Object.keys(divs).filter(code => !divs[code].always_covered).sort();
   if (!codes.length) { host.innerHTML = '<span class="hint">No mappable divisions (all are distance-blind)</span>'; return; }
+
+  if (!mapPaneLinkedContractors) {
+    try { mapPaneLinkedContractors = await fetch('/api/linked-contractors').then(r => r.json()); } catch (e) { mapPaneLinkedContractors = []; }
+  }
+
   host.innerHTML = codes.map(code => {
     const d = divs[code];
     if (depthTargets[code] == null) depthTargets[code] = d.target_bidders || 3;
     const checked = depthSelected.has(code) ? 'checked' : '';
+    const expanded = depthExpandedDivisions.has(code);
+    const contractors = mapPaneLinkedContractors.filter(c => c.divisions.includes(code));
     return `
       <div class="depth-div-row">
+        <button type="button" class="depth-div-expand" onclick="toggleDepthDivisionExpand('${code}')" title="Show contractors in this division">${expanded ? '▾' : '▸'}</button>
         <input type="checkbox" data-division="${code}" ${checked} onchange="onDepthDivisionToggled(this)">
         <span class="depth-div-name" title="${escapeHtml(d.name)}">${code} ${escapeHtml(d.name)}</span>
         <input type="number" class="depth-target-input" min="1" max="10" value="${depthTargets[code]}" onchange="onDepthTargetChanged('${code}', this.value)">
-      </div>`;
+      </div>
+      ${expanded ? depthContractorListHtml(code, contractors) : ''}`;
   }).join('');
+}
+
+function depthContractorListHtml(code, contractors) {
+  if (!contractors.length) return `<div class="depth-contractor-list"><span class="hint">No linked contractors for this division yet.</span></div>`;
+  return `<div class="depth-contractor-list">
+    <div class="depth-contractor-actions">
+      <span class="hint">Filter which contractors count toward this division's depth:</span>
+      <button type="button" class="btn btn-ghost btn-sm" onclick="setDepthExclusionForDivision('${code}', false)">All</button>
+      <button type="button" class="btn btn-ghost btn-sm" onclick="setDepthExclusionForDivision('${code}', true)">None</button>
+    </div>
+    ${contractors.map(c => `
+      <label class="depth-contractor-row">
+        <input type="checkbox" data-bidder="${escapeHtml(c.bidderName)}" ${depthExcludedBidders.has(c.bidderName) ? '' : 'checked'} onchange="onDepthContractorToggled(this)">
+        <span title="${escapeHtml(c.bidderName)}">${escapeHtml(c.bidderName)}</span>
+      </label>`).join('')}
+  </div>`;
+}
+
+function toggleDepthDivisionExpand(code) {
+  if (depthExpandedDivisions.has(code)) depthExpandedDivisions.delete(code); else depthExpandedDivisions.add(code);
+  renderDepthDivisionList();
+}
+
+function onDepthContractorToggled(cb) {
+  const name = cb.dataset.bidder;
+  if (cb.checked) depthExcludedBidders.delete(name); else depthExcludedBidders.add(name);
+  onDepthSettingsChanged(true);
+}
+
+function setDepthExclusionForDivision(code, excludeAll) {
+  const contractors = (mapPaneLinkedContractors || []).filter(c => c.divisions.includes(code));
+  for (const c of contractors) {
+    if (excludeAll) depthExcludedBidders.add(c.bidderName); else depthExcludedBidders.delete(c.bidderName);
+  }
+  renderDepthDivisionList();
+  onDepthSettingsChanged(true);
 }
 
 function onDepthDivisionToggled(cb) {
@@ -1996,7 +2056,7 @@ async function toggleDepthLayer() {
       Object.keys(coverageConfig.config.divisions).forEach(code => {
         if (!coverageConfig.config.divisions[code].always_covered) depthSelected.add(code);
       });
-      renderDepthDivisionList();
+      await renderDepthDivisionList();
     }
     await renderDepthLayer(true);
   } else {
@@ -2011,11 +2071,13 @@ async function renderDepthLayer(forceFetch) {
   if (!depthEnabled || !depthSelected.size) return;
   const divisions = [...depthSelected];
   const padMiles = document.getElementById('depth-pad-miles')?.value || '';
-  const divKey = divisions.join(',') + '|' + padMiles;
+  const excludeList = [...depthExcludedBidders].sort();
+  const divKey = divisions.join(',') + '|' + padMiles + '|' + excludeList.join(',');
   if (forceFetch || !depthData || depthData._divKey !== divKey) {
     try {
       const padParam = padMiles ? `&padMiles=${encodeURIComponent(padMiles)}` : '';
-      const resp = await fetch(`/api/coverage-depth?divisions=${divisions.join(',')}&resolution=7${padParam}`).then(r => r.json());
+      const excludeParam = excludeList.length ? `&excludeBidders=${excludeList.map(encodeURIComponent).join(',')}` : '';
+      const resp = await fetch(`/api/coverage-depth?divisions=${divisions.join(',')}&resolution=7${padParam}${excludeParam}`).then(r => r.json());
       resp._divKey = divKey;
       depthData = resp;
     } catch (e) {
