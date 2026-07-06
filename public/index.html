@@ -249,7 +249,7 @@
     .bidcov-section { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px 18px; margin-bottom: 18px; }
     .bidcov-section-header { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
     .bidcov-section-header h3 { font-size: 0.95rem; margin: 0; }
-    .bidcov-section-header input[type=text] { margin-left: auto; width: 220px; }
+    .bidcov-section-header > input[type=text] { margin-left: auto; width: 220px; }
     .bc-table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
     .bc-table th { text-align: left; font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text2); padding: 4px 8px; border-bottom: 1px solid var(--border); }
     .bc-table td { padding: 6px 8px; border-bottom: 1px solid var(--border); vertical-align: middle; }
@@ -832,8 +832,12 @@
     <div class="bidcov-section">
       <div class="bidcov-section-header">
         <h3>Bidder Links <span class="hint" id="bc-links-count"></span></h3>
-        <input type="text" id="bc-links-filter" placeholder="Filter by name…" oninput="renderBidderLinksTable()">
+        <div style="margin-left:auto; display:flex; gap:8px; align-items:center">
+          <button class="btn btn-success btn-sm" id="bc-saveall-btn" onclick="saveAllBidderLinks()">💾 Save All Visible</button>
+          <input type="text" id="bc-links-filter" placeholder="Filter by name…" style="width:180px" oninput="renderBidderLinksTable()">
+        </div>
       </div>
+      <div class="hint" style="margin-bottom:8px">"Save All Visible" confirms every unconfirmed row's current selection (including pre-filled guesses) at once — skims through and Skip/change any that look wrong first.</div>
       <div id="bc-links-table"><span class="hint">Sync bid data to see bidders.</span></div>
     </div>
 
@@ -1667,6 +1671,37 @@ async function unlinkBidderLinkRow(btn) {
   const bidderName = btn.closest('tr').dataset.bidder;
   await fetch(`/api/bidder-links/${encodeURIComponent(bidderName)}/unlink`, { method: 'POST' });
   bidderLinksAll = [];
+  await renderBidderLinksTable();
+  if (depthEnabled) await renderDepthLayer(true);
+}
+
+// Confirms every currently-visible, not-yet-confirmed row's current
+// selection in one batched call — including any pre-filled "guess" the
+// user didn't change, so review it before clicking this.
+async function saveAllBidderLinks() {
+  const byName = new Map(bidderLinksAll.map(b => [b.bidderName, b]));
+  const rows = [...document.querySelectorAll('#bc-links-table tr[data-bidder]')];
+  const items = [];
+  for (const row of rows) {
+    const bidderName = row.dataset.bidder;
+    const info = byName.get(bidderName);
+    if (info && info.confirmed) continue;
+    const locationId = row.querySelector('.bc-link-location')?.value;
+    if (!locationId) continue;
+    const division = row.querySelector('.bc-link-division')?.value || undefined;
+    items.push({ bidderName, locationId, division });
+  }
+  if (!items.length) { alert('Nothing to save — no unconfirmed rows here have a location selected.'); return; }
+  if (!confirm(`Save ${items.length} bidder link(s)? This includes any pre-filled "guess" you haven't changed — Skip or fix any that look wrong first.`)) return;
+
+  const btn = document.getElementById('bc-saveall-btn');
+  if (btn) { btn.disabled = true; btn.textContent = `⏳ Saving ${items.length}…`; }
+  await fetch('/api/bidder-links/bulk-confirm', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ links: items })
+  });
+  if (btn) { btn.disabled = false; btn.textContent = '💾 Save All Visible'; }
+  bidderLinksAll = [];
+  await refreshBidCovStatus();
   await renderBidderLinksTable();
   if (depthEnabled) await renderDepthLayer(true);
 }

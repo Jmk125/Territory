@@ -907,6 +907,34 @@ app.post('/api/bidder-links/resync', async (req, res) => {
   res.json({ ok: true, clearedDangling: dangling.length, bidderCount: bidders.length, needsReview });
 });
 
+// Bulk "Save All Visible" — confirms a batch of bidder->location picks (and
+// optional division overrides) in one call instead of one round-trip per
+// row, then re-derives once at the end. Registered ahead of the
+// `:bidderName` route below for the same reason resync is.
+app.post('/api/bidder-links/bulk-confirm', async (req, res) => {
+  const items = Array.isArray(req.body.links) ? req.body.links : [];
+  let updated = 0;
+  for (const item of items) {
+    const bidderName = String(item.bidderName || '').trim();
+    const locationId = item.locationId;
+    if (!bidderName || !locationId) continue;
+    await new Promise(resolve => db.bidderLinks.update(
+      { bidderName },
+      { bidderName, locationId, method: 'manual', confirmed: true, updatedAt: Date.now() },
+      { upsert: true }, () => resolve()
+    ));
+    updated++;
+    if (item.division) {
+      await new Promise(resolve => db.bidderDivisionOverrides.update(
+        { bidderName }, { bidderName, division: item.division, updatedAt: Date.now() }, { upsert: true }, () => resolve()
+      ));
+    }
+  }
+  await new Promise(resolve => db.coverageDepthCache.remove({}, { multi: true }, () => resolve()));
+  await reDeriveIfPossible();
+  res.json({ ok: true, updated });
+});
+
 app.post('/api/bidder-links/:bidderName', (req, res) => {
   const bidderName = req.params.bidderName;
   const locationId = req.body.locationId;
