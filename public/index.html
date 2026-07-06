@@ -245,6 +245,21 @@
     .link-review-picker input { width: 100%; margin-bottom: 3px; }
     .link-review-picker select { width: 100%; }
     .link-review-actions { flex-shrink: 0; display: flex; gap: 4px; }
+    .bidcov-tab { flex: 1; overflow-y: auto; padding: 20px 28px; max-width: 1100px; margin: 0 auto; width: 100%; }
+    .bidcov-section { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px 18px; margin-bottom: 18px; }
+    .bidcov-section-header { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
+    .bidcov-section-header h3 { font-size: 0.95rem; margin: 0; }
+    .bidcov-section-header input[type=text] { margin-left: auto; width: 220px; }
+    .bc-table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+    .bc-table th { text-align: left; font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text2); padding: 4px 8px; border-bottom: 1px solid var(--border); }
+    .bc-table td { padding: 6px 8px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+    .bc-table tr:last-child td { border-bottom: none; }
+    .bc-table input[type=text], .bc-table input[type=number], .bc-table select { background: var(--surface2); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-size: 0.78rem; padding: 3px 6px; }
+    .bc-table input[type=number] { width: 56px; }
+    .bc-name-cell { max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .bc-tag { display: inline-block; font-size: 0.65rem; padding: 1px 6px; border-radius: 8px; background: var(--surface2); color: var(--text2); margin-left: 4px; }
+    .bc-tag.warn { color: var(--accent2); }
+    .bc-tag.ok { color: var(--success); }
     .legend-type { display: flex; flex-direction: column; }
     .legend-name { flex: 1; }
     .legend-filter-btn { background: none; border: none; color: var(--text2); cursor: pointer; padding: 2px 4px; border-radius: 4px; display: inline-flex; align-items: center; gap: 2px; }
@@ -654,6 +669,7 @@
 <div class="tabs">
   <button class="tab-btn active" onclick="switchTab('map')">🗺 Map View</button>
   <button class="tab-btn" onclick="switchTab('config')">⚙ Configure</button>
+  <button class="tab-btn" onclick="switchTab('bidcoverage')">🧮 Bid Coverage</button>
 </div>
 
 <div class="map-tab-bar" id="map-tab-bar"></div>
@@ -722,24 +738,23 @@
       <button class="measure-clear" id="measure-clear" onclick="clearMeasure()" style="display:none">Clear measurement</button>
     </div>
 
-    <div class="section-divider">Bid Coverage <button class="gear-btn bidcov-gear" title="Bid Database connection" onclick="openBidDbSettings()">⚙</button></div>
+    <div class="section-divider">Coverage Depth</div>
     <div class="bidcov-status-row">
       <span id="bidcov-badge" class="badge-ors fallback">⚪ No live data</span>
+      <button class="btn btn-ghost btn-sm" onclick="switchTab('bidcoverage')" style="margin-left:auto">Manage →</button>
     </div>
-    <div class="row" style="gap:6px; margin:6px 0;">
-      <button class="btn btn-ghost btn-sm" id="bidcov-sync-btn" onclick="runBidSync()" style="flex:1">🔄 Refresh Bid Data</button>
-      <button class="btn btn-ghost btn-sm" id="bidcov-review-btn" onclick="openLinkReview()" style="flex:1">📋 Review Links</button>
-    </div>
-    <div id="bidcov-sync-status" class="hint"></div>
-
-    <div class="section-divider">Coverage Depth</div>
-    <div id="depth-division-list" class="type-legend"><span class="hint">Sync bid data to see divisions</span></div>
+    <div id="depth-division-list" class="type-legend"><span class="hint">Sync bid data (Bid Coverage tab) to see divisions</span></div>
     <div class="row" style="gap:8px; align-items:center; margin-top:6px">
       <label class="field-label" style="margin-bottom:0">Rule</label>
       <select id="depth-rule" onchange="onDepthSettingsChanged()">
         <option value="min" selected>Minimum (limiting division)</option>
         <option value="average">Average</option>
       </select>
+    </div>
+    <div class="row" style="gap:8px; align-items:center; margin-top:8px">
+      <label class="field-label" style="margin-bottom:0; flex:1">Grid extent beyond outer radius</label>
+      <input type="number" id="depth-pad-miles" placeholder="auto" min="5" max="150" style="width:64px" onchange="onDepthSettingsChanged(true)">
+      <span class="hint">mi</span>
     </div>
     <div class="row" style="gap:8px; align-items:center; margin-top:8px">
       <input type="checkbox" id="depth-enabled" onchange="toggleDepthLayer()">
@@ -783,6 +798,48 @@
       </div>
     </div>
   </div>
+  </div>
+</div>
+
+<!-- BID COVERAGE PANEL -->
+<div id="panel-bidcoverage" class="panel">
+  <div class="bidcov-tab">
+    <div class="bidcov-section">
+      <div class="bidcov-section-header">
+        <h3>Connection &amp; Sync</h3>
+        <span id="bidcov-tab-badge" class="badge-ors fallback">⚪ No live data</span>
+      </div>
+      <div class="row" style="gap:6px; align-items:center">
+        <input type="text" id="bc-biddb-url" placeholder="http://192.168.1.50:3020" style="flex:1">
+        <button class="btn btn-ghost btn-sm" onclick="saveBidDbSettingsTab()">Save</button>
+        <button class="btn btn-success btn-sm" id="bc-sync-btn" onclick="runBidSyncTab()">🔄 Refresh Bid Data</button>
+      </div>
+      <div id="bc-sync-status" class="hint" style="margin-top:6px"></div>
+    </div>
+
+    <div class="bidcov-section">
+      <div class="bidcov-section-header">
+        <h3>Divisions</h3>
+        <span class="hint">Rename a division's display label or set its target bidder count — both persist across syncs.</span>
+      </div>
+      <div id="bc-divisions-table"><span class="hint">Sync bid data to see divisions.</span></div>
+    </div>
+
+    <div class="bidcov-section">
+      <div class="bidcov-section-header">
+        <h3>Bidder Links <span class="hint" id="bc-links-count"></span></h3>
+        <input type="text" id="bc-links-filter" placeholder="Filter by name…" oninput="renderBidderLinksTable()">
+      </div>
+      <div id="bc-links-table"><span class="hint">Sync bid data to see bidders.</span></div>
+    </div>
+
+    <div class="bidcov-section">
+      <div class="bidcov-section-header">
+        <h3>Manual Bidder Overrides</h3>
+        <span class="hint">Auto-derived flags win by default; anything set here overrides them.</span>
+      </div>
+      <div id="bc-overrides-table"><span class="hint">None yet.</span></div>
+    </div>
   </div>
 </div>
 
@@ -1350,48 +1407,55 @@ async function refreshBidCovStatus() {
   try { bidDbSettings = await fetch('/api/bid-db-settings').then(r => r.json()); } catch (e) { bidDbSettings = null; }
   try { coverageConfig = await fetch('/api/coverage-config').then(r => r.json()); } catch (e) { coverageConfig = null; }
   updateBidCovBadge();
-  await refreshLinkReviewCount();
   renderDepthDivisionList();
 }
 
 function updateBidCovBadge() {
-  const badge = document.getElementById('bidcov-badge');
-  if (!badge) return;
-  if (!coverageConfig) { badge.textContent = '⚪ No config'; badge.className = 'badge-ors fallback'; return; }
-  const date = coverageConfig.generatedAt ? new Date(coverageConfig.generatedAt).toLocaleDateString() : '—';
-  if (coverageConfig.source === 'cached') { badge.textContent = `🟢 Live-derived (${date})`; badge.className = 'badge-ors active'; }
-  else { badge.textContent = `⚪ Bundled default (${date})`; badge.className = 'badge-ors fallback'; }
+  const text = !coverageConfig ? '⚪ No config'
+    : coverageConfig.source === 'cached' ? `🟢 Live-derived (${coverageConfig.generatedAt ? new Date(coverageConfig.generatedAt).toLocaleDateString() : '—'})`
+    : `⚪ Bundled default (${coverageConfig.generatedAt ? new Date(coverageConfig.generatedAt).toLocaleDateString() : '—'})`;
+  const cls = coverageConfig && coverageConfig.source === 'cached' ? 'badge-ors active' : 'badge-ors fallback';
+  ['bidcov-badge', 'bidcov-tab-badge'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) { el.textContent = text; el.className = cls; }
+  });
 }
 
-function openBidDbSettings() {
-  const s = bidDbSettings || { baseUrl: '', lastSyncAt: null, lastSyncMessage: '' };
-  const lastSync = s.lastSyncAt ? new Date(s.lastSyncAt).toLocaleString() : 'never';
-  openModal('⚙ Bid Database Connection', `
-    <div class="hint" style="margin-bottom:14px">Point Territory at your Bid Database app's <code>/api/bid-observations</code> endpoint.</div>
-    <label class="field-label">Bid Database URL</label>
-    <input type="text" id="biddb-url" placeholder="http://192.168.1.50:3020" value="${escapeHtml(s.baseUrl || '')}" style="width:100%">
-    <div class="hint" style="margin-top:8px">Last sync: ${lastSync}${s.lastSyncMessage ? ' — ' + escapeHtml(s.lastSyncMessage) : ''}</div>
-    <div style="margin-top:18px; display:flex; gap:8px; justify-content:flex-end">
-      <button class="btn btn-ghost" type="button" onclick="closeModal()">Cancel</button>
-      <button class="btn btn-success" type="button" onclick="saveBidDbSettings()">Save</button>
-    </div>
-  `);
+// ══════════════════════════════════
+// BID COVERAGE TAB (management view)
+// ══════════════════════════════════
+let bidderLinksAll = [];       // last full fetch of /api/bidder-links?all=true
+let coverageOverridesAll = []; // last fetch of /api/coverage-overrides
+
+async function renderBidCoverageTab() {
+  await refreshBidCovStatus();
+  const urlInput = document.getElementById('bc-biddb-url');
+  if (urlInput && !urlInput.dataset.dirty) urlInput.value = (bidDbSettings && bidDbSettings.baseUrl) || '';
+  if (bidDbSettings && bidDbSettings.lastSyncAt) {
+    const status = document.getElementById('bc-sync-status');
+    if (status && !status.dataset.transient) {
+      status.textContent = `Last sync: ${new Date(bidDbSettings.lastSyncAt).toLocaleString()}${bidDbSettings.lastSyncMessage ? ' — ' + bidDbSettings.lastSyncMessage : ''}`;
+      status.style.color = bidDbSettings.lastSyncOk === false ? 'var(--danger)' : 'var(--text2)';
+    }
+  }
+  renderDivisionsTable();
+  await renderBidderLinksTable();
+  await renderOverridesTable();
 }
 
-async function saveBidDbSettings() {
-  const baseUrl = document.getElementById('biddb-url')?.value || '';
+async function saveBidDbSettingsTab() {
+  const baseUrl = document.getElementById('bc-biddb-url')?.value || '';
   await fetch('/api/bid-db-settings', {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ baseUrl })
   });
-  closeModal();
   await refreshBidCovStatus();
 }
 
-async function runBidSync() {
-  const btn = document.getElementById('bidcov-sync-btn');
-  const status = document.getElementById('bidcov-sync-status');
+async function runBidSyncTab() {
+  const btn = document.getElementById('bc-sync-btn');
+  const status = document.getElementById('bc-sync-status');
   if (btn) { btn.disabled = true; btn.textContent = '⏳ Syncing…'; }
-  if (status) { status.textContent = 'Fetching bid observations…'; status.style.color = 'var(--text2)'; }
+  if (status) { status.dataset.transient = '1'; status.textContent = 'Fetching bid observations…'; status.style.color = 'var(--text2)'; }
   try {
     const r = await fetch('/api/bid-sync', { method: 'POST' }).then(r => r.json());
     if (status) {
@@ -1402,20 +1466,56 @@ async function runBidSync() {
     if (status) { status.textContent = `🔴 Sync failed: ${e.message}`; status.style.color = 'var(--danger)'; }
   }
   if (btn) { btn.disabled = false; btn.textContent = '🔄 Refresh Bid Data'; }
-  await refreshBidCovStatus();
+  if (status) delete status.dataset.transient;
+  await renderBidCoverageTab();
   if (depthEnabled) await renderDepthLayer(true);
 }
 
-async function refreshLinkReviewCount() {
-  try {
-    const list = await fetch('/api/bidder-links').then(r => r.json());
-    const btn = document.getElementById('bidcov-review-btn');
-    if (btn) btn.textContent = list.length ? `📋 Review Links (${list.length})` : '📋 Review Links';
-  } catch (e) { /* leave label as-is */ }
+// ── Divisions table: rename display name, edit target_bidders ──────
+function renderDivisionsTable() {
+  const host = document.getElementById('bc-divisions-table');
+  if (!host) return;
+  const divs = coverageConfig && coverageConfig.config && coverageConfig.config.divisions;
+  if (!divs) { host.innerHTML = '<span class="hint">Sync bid data to see divisions.</span>'; return; }
+  const codes = Object.keys(divs).sort();
+  host.innerHTML = `<table class="bc-table"><thead><tr>
+      <th>Code</th><th>Name</th><th>Tier</th><th>Competitive / Outer (mi)</th><th>Target bidders</th><th></th>
+    </tr></thead><tbody>
+    ${codes.map(code => {
+      const d = divs[code];
+      const radii = d.always_covered ? '<span class="bc-tag ok">always covered</span>' : `${d.competitive_radius_mi ?? '—'} / ${d.outer_radius_mi ?? '—'}`;
+      return `<tr data-division="${code}">
+        <td>${code}</td>
+        <td><input type="text" class="bc-div-name" value="${escapeHtml(d.name || '')}" style="width:160px"></td>
+        <td>${escapeHtml(d.tier || '')}</td>
+        <td>${radii}</td>
+        <td><input type="number" class="bc-div-target" min="1" max="10" value="${d.target_bidders || 3}" style="width:48px"></td>
+        <td><button class="btn btn-ghost btn-sm" onclick="saveDivisionRow(this)">Save</button></td>
+      </tr>`;
+    }).join('')}
+  </tbody></table>`;
 }
 
-// ── Link-review panel ────────────────────────────────────────────
-function locationOptionsFor(divisions) {
+async function saveDivisionRow(btn) {
+  const row = btn.closest('tr');
+  const code = row.dataset.division;
+  const name = row.querySelector('.bc-div-name').value.trim();
+  const target = parseInt(row.querySelector('.bc-div-target').value, 10);
+  const tasks = [];
+  if (name) tasks.push(fetch(`/api/division-overrides/${encodeURIComponent(code)}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name })
+  }));
+  if (target > 0) tasks.push(fetch(`/api/coverage-config/target-bidders/${encodeURIComponent(code)}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ target_bidders: target })
+  }));
+  await Promise.all(tasks);
+  await refreshBidCovStatus();
+  renderDivisionsTable();
+  if (depthEnabled) await renderDepthLayer(true);
+}
+
+// ── Bidder links table: full roster, reassign/unlink/skip/division ─
+function bcLocationSelectHtml(currentId, divisions) {
   const matchTypeIds = new Set();
   if (divisions && divisions.length) {
     for (const t of locationTypes) {
@@ -1425,63 +1525,149 @@ function locationOptionsFor(divisions) {
   }
   const preferredList = locations.filter(l => matchTypeIds.has(l.typeId));
   const restList = locations.filter(l => !matchTypeIds.has(l.typeId));
-  const opt = l => `<option value="${l._id}">${escapeHtml(l.name)}</option>`;
-  let html = '<option value="">— choose a location —</option>';
+  const opt = l => `<option value="${l._id}" ${l._id === currentId ? 'selected' : ''}>${escapeHtml(l.name)}</option>`;
+  let html = '<option value="">— none —</option>';
   if (preferredList.length) html += `<optgroup label="Matching type">${preferredList.map(opt).join('')}</optgroup>`;
   html += `<optgroup label="All locations">${restList.map(opt).join('')}</optgroup>`;
   return html;
 }
 
-function linkReviewHtml(list) {
-  if (!list.length) return '<div class="hint">Nothing to review — every bidder is linked.</div>';
-  return list.map(b => `
-    <div class="link-review-row" data-bidder="${escapeHtml(b.bidderName)}">
-      <div class="link-review-name" title="${escapeHtml(b.bidderName)}">${escapeHtml(b.bidderName)}</div>
-      <div class="link-review-count">${b.bidCount} bid${b.bidCount !== 1 ? 's' : ''}${b.method === 'fuzzy' ? ' · fuzzy' : ''}</div>
-      <div class="link-review-picker">
-        <input type="text" placeholder="Filter locations…" oninput="filterLinkReviewOptions(this)">
-        <select>${locationOptionsFor(b.divisions)}</select>
-      </div>
-      <div class="link-review-actions">
-        <button class="btn btn-ghost btn-sm" title="Confirm this location" onclick="confirmBidderLink(this)">✓</button>
-        <button class="btn btn-ghost btn-sm" title="No location for this bidder" onclick="skipBidderLink(this)">Skip</button>
-      </div>
-    </div>
-  `).join('');
+function bcDivisionSelectHtml(current, seenDivisions) {
+  const divs = (coverageConfig && coverageConfig.config && coverageConfig.config.divisions) || {};
+  const codes = [...new Set([...Object.keys(divs), ...(seenDivisions || [])])].sort();
+  let html = '<option value="">(from bid data)</option>';
+  html += codes.map(c => `<option value="${c}" ${c === current ? 'selected' : ''}>${c} ${escapeHtml((divs[c] && divs[c].name) || '')}</option>`).join('');
+  return html;
 }
 
-async function openLinkReview() {
-  const list = await fetch('/api/bidder-links').then(r => r.json());
-  openModal('📋 Review Bidder Links', linkReviewHtml(list), { wide: true });
-}
-
-function filterLinkReviewOptions(input) {
-  const select = input.nextElementSibling;
-  const q = input.value.trim().toLowerCase();
-  for (const opt of select.querySelectorAll('option')) {
-    if (!opt.value) continue;
-    opt.style.display = !q || opt.textContent.toLowerCase().includes(q) ? '' : 'none';
+async function renderBidderLinksTable() {
+  const host = document.getElementById('bc-links-table');
+  const countEl = document.getElementById('bc-links-count');
+  if (!host) return;
+  if (!bidderLinksAll.length) {
+    try { bidderLinksAll = await fetch('/api/bidder-links?all=true').then(r => r.json()); } catch (e) { bidderLinksAll = []; }
   }
+  const q = (document.getElementById('bc-links-filter')?.value || '').trim().toLowerCase();
+  const list = q ? bidderLinksAll.filter(b => b.bidderName.toLowerCase().includes(q)) : bidderLinksAll;
+  if (countEl) countEl.textContent = `(${bidderLinksAll.length} total, ${bidderLinksAll.filter(b => !b.confirmed).length} need review)`;
+  if (!list.length) { host.innerHTML = '<span class="hint">Sync bid data to see bidders.</span>'; return; }
+  const locById = new Map(locations.map(l => [l._id, l]));
+  host.innerHTML = `<table class="bc-table"><thead><tr>
+      <th>Bidder</th><th>Bids</th><th>Division</th><th>Linked location</th><th>Status</th><th></th>
+    </tr></thead><tbody>
+    ${list.map(b => {
+      const statusTag = b.confirmed
+        ? (b.locationId ? `<span class="bc-tag ok">${escapeHtml(b.method)}</span>` : `<span class="bc-tag">skipped</span>`)
+        : (b.method === 'fuzzy' ? `<span class="bc-tag warn">fuzzy — needs confirm</span>` : `<span class="bc-tag warn">unlinked</span>`);
+      return `<tr data-bidder="${escapeHtml(b.bidderName)}">
+        <td class="bc-name-cell" title="${escapeHtml(b.bidderName)}">${escapeHtml(b.bidderName)}</td>
+        <td>${b.bidCount}</td>
+        <td><select class="bc-link-division">${bcDivisionSelectHtml(b.divisionOverride, b.divisions)}</select></td>
+        <td><select class="bc-link-location">${bcLocationSelectHtml(b.locationId, b.divisions)}</select></td>
+        <td>${statusTag}</td>
+        <td style="white-space:nowrap">
+          <button class="btn btn-ghost btn-sm" title="Save location + division" onclick="saveBidderLinkRow(this)">Save</button>
+          <button class="btn btn-ghost btn-sm" title="Skip — no location for this bidder" onclick="skipBidderLinkRow(this)">Skip</button>
+          <button class="btn btn-ghost btn-sm" title="Unlink and re-run auto-matching next sync" onclick="unlinkBidderLinkRow(this)">Unlink</button>
+        </td>
+      </tr>`;
+    }).join('')}
+  </tbody></table>`;
 }
 
-async function confirmBidderLink(btn) {
-  const row = btn.closest('.link-review-row');
+async function saveBidderLinkRow(btn) {
+  const row = btn.closest('tr');
   const bidderName = row.dataset.bidder;
-  const locationId = row.querySelector('select').value;
-  if (!locationId) { row.querySelector('select').focus(); return; }
-  await fetch(`/api/bidder-links/${encodeURIComponent(bidderName)}`, {
+  const locationId = row.querySelector('.bc-link-location').value;
+  const division = row.querySelector('.bc-link-division').value;
+  const tasks = [];
+  if (locationId) tasks.push(fetch(`/api/bidder-links/${encodeURIComponent(bidderName)}`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ locationId })
-  });
-  row.remove();
-  await refreshLinkReviewCount();
+  }));
+  if (division) tasks.push(fetch(`/api/bidder-division-overrides/${encodeURIComponent(bidderName)}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ division })
+  }));
+  else tasks.push(fetch(`/api/bidder-division-overrides/${encodeURIComponent(bidderName)}`, { method: 'DELETE' }));
+  await Promise.all(tasks);
+  bidderLinksAll = [];
+  await refreshBidCovStatus();
+  await renderBidderLinksTable();
+  if (depthEnabled) await renderDepthLayer(true);
 }
 
-async function skipBidderLink(btn) {
-  const row = btn.closest('.link-review-row');
-  const bidderName = row.dataset.bidder;
+async function skipBidderLinkRow(btn) {
+  const bidderName = btn.closest('tr').dataset.bidder;
   await fetch(`/api/bidder-links/${encodeURIComponent(bidderName)}/skip`, { method: 'POST' });
-  row.remove();
-  await refreshLinkReviewCount();
+  bidderLinksAll = [];
+  await renderBidderLinksTable();
+}
+
+async function unlinkBidderLinkRow(btn) {
+  const bidderName = btn.closest('tr').dataset.bidder;
+  await fetch(`/api/bidder-links/${encodeURIComponent(bidderName)}/unlink`, { method: 'POST' });
+  bidderLinksAll = [];
+  await renderBidderLinksTable();
+  if (depthEnabled) await renderDepthLayer(true);
+}
+
+// ── Manual bidder overrides table ───────────────────────────────────
+async function renderOverridesTable() {
+  const host = document.getElementById('bc-overrides-table');
+  if (!host) return;
+  try { coverageOverridesAll = await fetch('/api/coverage-overrides').then(r => r.json()); } catch (e) { coverageOverridesAll = []; }
+  const rows = coverageOverridesAll.map(o => `
+    <tr data-bidder="${escapeHtml(o.bidderName)}">
+      <td class="bc-name-cell" title="${escapeHtml(o.bidderName)}">${escapeHtml(o.bidderName)}</td>
+      <td><input type="text" class="bc-ov-division" value="${escapeHtml(o.division || '')}" style="width:40px"></td>
+      <td><input type="number" class="bc-ov-weight" step="0.1" min="0" max="1" value="${o.weight_multiplier != null ? o.weight_multiplier : ''}" style="width:52px" placeholder="1.0"></td>
+      <td><label class="hint"><input type="checkbox" class="bc-ov-support" ${o.median_support_only ? 'checked' : ''}> support-only</label></td>
+      <td><label class="hint"><input type="checkbox" class="bc-ov-ignoredecay" ${o.ignore_distance_decay ? 'checked' : ''}> ignore decay</label></td>
+      <td><input type="text" class="bc-ov-note" value="${escapeHtml(o.note || '')}" style="width:180px"></td>
+      <td style="white-space:nowrap">
+        <button class="btn btn-ghost btn-sm" onclick="saveOverrideRow(this)">Save</button>
+        <button class="btn btn-ghost btn-sm" onclick="deleteOverrideRow(this)">Delete</button>
+      </td>
+    </tr>`).join('');
+  const newRow = `
+    <tr data-bidder="">
+      <td><input type="text" class="bc-ov-name" placeholder="Bidder name" style="width:140px"></td>
+      <td><input type="text" class="bc-ov-division" placeholder="04" style="width:40px"></td>
+      <td><input type="number" class="bc-ov-weight" step="0.1" min="0" max="1" style="width:52px" placeholder="1.0"></td>
+      <td><label class="hint"><input type="checkbox" class="bc-ov-support"> support-only</label></td>
+      <td><label class="hint"><input type="checkbox" class="bc-ov-ignoredecay"> ignore decay</label></td>
+      <td><input type="text" class="bc-ov-note" placeholder="note" style="width:180px"></td>
+      <td><button class="btn btn-success btn-sm" onclick="saveOverrideRow(this, true)">Add</button></td>
+    </tr>`;
+  host.innerHTML = `<table class="bc-table"><thead><tr>
+      <th>Bidder</th><th>Div</th><th>Weight</th><th></th><th></th><th>Note</th><th></th>
+    </tr></thead><tbody>${rows}${newRow}</tbody></table>`;
+}
+
+async function saveOverrideRow(btn, isNew) {
+  const row = btn.closest('tr');
+  const bidderName = isNew ? row.querySelector('.bc-ov-name').value.trim() : row.dataset.bidder;
+  if (!bidderName) return;
+  const body = {
+    division: row.querySelector('.bc-ov-division').value.trim() || undefined,
+    weight_multiplier: row.querySelector('.bc-ov-weight').value !== '' ? Number(row.querySelector('.bc-ov-weight').value) : undefined,
+    median_support_only: row.querySelector('.bc-ov-support').checked || undefined,
+    ignore_distance_decay: row.querySelector('.bc-ov-ignoredecay').checked || undefined,
+    note: row.querySelector('.bc-ov-note').value.trim() || undefined
+  };
+  await fetch(`/api/coverage-overrides/${encodeURIComponent(bidderName)}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+  });
+  await refreshBidCovStatus();
+  await renderOverridesTable();
+  if (depthEnabled) await renderDepthLayer(true);
+}
+
+async function deleteOverrideRow(btn) {
+  const bidderName = btn.closest('tr').dataset.bidder;
+  await fetch(`/api/coverage-overrides/${encodeURIComponent(bidderName)}`, { method: 'DELETE' });
+  await refreshBidCovStatus();
+  await renderOverridesTable();
+  if (depthEnabled) await renderDepthLayer(true);
 }
 
 // ── Coverage-depth layer ─────────────────────────────────────────
@@ -1541,10 +1727,12 @@ async function renderDepthLayer(forceFetch) {
   depthLayer.clearLayers();
   if (!depthEnabled || !depthSelected.size) return;
   const divisions = [...depthSelected];
-  const divKey = divisions.join(',');
+  const padMiles = document.getElementById('depth-pad-miles')?.value || '';
+  const divKey = divisions.join(',') + '|' + padMiles;
   if (forceFetch || !depthData || depthData._divKey !== divKey) {
     try {
-      const resp = await fetch(`/api/coverage-depth?divisions=${divisions.join(',')}&resolution=7`).then(r => r.json());
+      const padParam = padMiles ? `&padMiles=${encodeURIComponent(padMiles)}` : '';
+      const resp = await fetch(`/api/coverage-depth?divisions=${divisions.join(',')}&resolution=7${padParam}`).then(r => r.json());
       resp._divKey = divKey;
       depthData = resp;
     } catch (e) {
@@ -1589,17 +1777,27 @@ function drawDepthCells(divisions) {
     }).addTo(depthLayer);
     poly.on('click', () => showDepthCellPopup(poly, id, divisions));
   }
-  renderDepthLegend();
+  renderDepthLegend(divisions);
   drawDepthContour(cellIds, divisions);
 }
 
-function renderDepthLegend() {
+function renderDepthLegend(divisions) {
   const host = document.getElementById('depth-legend');
   if (!host) return;
+  let note = '';
+  if (depthData && divisions) {
+    const pads = divisions.map(c => depthData.divisions[c] && depthData.divisions[c].padMiles).filter(v => v != null);
+    const coarsened = divisions.some(c => {
+      const d = depthData.divisions[c];
+      return d && d.resolution != null && d.resolution < depthData.resolution;
+    });
+    if (pads.length) note = `Grid extends ~${Math.round(Math.max(...pads))}mi past the outermost sub/project.` +
+      (coarsened ? ' Resolution auto-coarsened for a division with a wide outer radius.' : '');
+  }
   host.innerHTML = `<div class="depth-legend-swatches">
       <span style="background:${depthCellColor(0)}"></span><span style="background:${depthCellColor(0.5)}"></span><span style="background:${depthCellColor(1)}"></span>
       <span style="margin-left:4px">under-covered → at target</span>
-    </div>`;
+    </div>${note ? `<div style="margin-top:3px">${escapeHtml(note)}</div>` : ''}`;
 }
 
 function showDepthCellPopup(poly, cellId, divisions) {
@@ -2232,12 +2430,13 @@ function loadFilterGroup(id) {
 // ══════════════════════════════════
 function switchTab(tab) {
   if (tab !== 'map') closeLocationInfo();
-  document.querySelectorAll('.tab-btn').forEach((b,i) => b.classList.toggle('active', ['map','config'][i] === tab));
+  document.querySelectorAll('.tab-btn').forEach((b,i) => b.classList.toggle('active', ['map','config','bidcoverage'][i] === tab));
   document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
   document.getElementById('panel-' + tab).classList.add('active');
   const mapTabBar = document.getElementById('map-tab-bar');
   if (mapTabBar) mapTabBar.style.display = tab === 'map' ? 'flex' : 'none';
   if (tab === 'map') setTimeout(() => map.invalidateSize(), 50);
+  if (tab === 'bidcoverage') renderBidCoverageTab();
 }
 
 // ══════════════════════════════════
