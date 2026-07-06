@@ -2050,14 +2050,14 @@ function onDepthSettingsChanged(refetch) {
 }
 
 async function toggleDepthLayer() {
+  // Purely an on/off toggle for drawing — it must never change which
+  // divisions are checked above (that used to auto-select every division
+  // when none were picked yet, which silently turned "show the layer" into
+  // "show the combined min across everything," making a single-contractor
+  // exclusion in one division invisible against the other divisions'
+  // stricter limit).
   depthEnabled = document.getElementById('depth-enabled')?.checked || false;
   if (depthEnabled) {
-    if (!depthSelected.size && coverageConfig && coverageConfig.config) {
-      Object.keys(coverageConfig.config.divisions).forEach(code => {
-        if (!coverageConfig.config.divisions[code].always_covered) depthSelected.add(code);
-      });
-      await renderDepthDivisionList();
-    }
     await renderDepthLayer(true);
   } else {
     depthLayer.clearLayers();
@@ -2068,7 +2068,12 @@ async function toggleDepthLayer() {
 
 async function renderDepthLayer(forceFetch) {
   depthLayer.clearLayers();
-  if (!depthEnabled || !depthSelected.size) return;
+  if (!depthEnabled) return;
+  if (!depthSelected.size) {
+    const legend = document.getElementById('depth-legend');
+    if (legend) legend.innerHTML = '<span class="hint">Check one or more divisions above to draw their coverage depth.</span>';
+    return;
+  }
   const divisions = [...depthSelected];
   const padMiles = document.getElementById('depth-pad-miles')?.value || '';
   const excludeList = [...depthExcludedBidders].sort();
