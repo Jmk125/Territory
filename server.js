@@ -1263,7 +1263,7 @@ const MAX_HEX_CELLS = 20000; // safety cap for a Pi-class host
 // "Linked subs" for a division = bidders with a confirmed, non-skip
 // location link AND actual bid history in that division (not just any
 // location tagged with a matching type) — depth reflects proven presence.
-async function getBiddersForDivision(division, config, observations) {
+async function getBiddersForDivision(division, config, observations, excludeSet) {
   const bidderDivisions = new Map();
   for (const o of observations) {
     if (!o.bidder || !o.csi_division) continue;
@@ -1276,6 +1276,7 @@ async function getBiddersForDivision(division, config, observations) {
 
   const out = [];
   for (const link of links) {
+    if (excludeSet && excludeSet.has(link.bidderName)) continue;
     const divs = bidderDivisions.get(link.bidderName);
     if (!divs || !divs.has(division)) continue;
     const loc = locationsById.get(link.locationId);
@@ -1283,7 +1284,7 @@ async function getBiddersForDivision(division, config, observations) {
     const ov = overrides[link.bidderName];
     const scoped = ov && (!ov.division || ov.division === division) ? ov : null;
     out.push({
-      locationId: loc._id, name: loc.name, lat: loc.lat, lng: loc.lng,
+      locationId: loc._id, bidderName: link.bidderName, name: loc.name, lat: loc.lat, lng: loc.lng,
       multiplier: scoped && scoped.weight_multiplier != null ? scoped.weight_multiplier : 1,
       medianSupportOnly: !!(scoped && scoped.median_support_only),
       ignoreDistanceDecay: !!(scoped && scoped.ignore_distance_decay),
@@ -1303,6 +1304,14 @@ app.get('/api/coverage-depth', async (req, res) => {
     const v = Number(req.query.padMiles);
     if (Number.isFinite(v)) padOverride = Math.min(150, Math.max(5, v));
   }
+  // Optional per-bidder exclusion so a single contractor's shape can be
+  // isolated (or several toggled off) without touching the derived config.
+  const excludeSet = req.query.excludeBidders
+    ? new Set(String(req.query.excludeBidders).split(',').filter(Boolean).map(decodeURIComponent))
+    : null;
+  const excludeTag = excludeSet && excludeSet.size
+    ? crypto.createHash('sha1').update([...excludeSet].sort().join('|')).digest('hex').slice(0, 10)
+    : 'all';
 
   const configDoc = await getCoverageConfigDoc();
   const config = configDoc ? configDoc.config : BUNDLED_CONFIG;
@@ -1315,8 +1324,8 @@ app.get('/api/coverage-depth', async (req, res) => {
     const divCfg = config.divisions[division];
     if (!divCfg || divCfg.always_covered) { out.divisions[division] = { alwaysCovered: true }; continue; }
 
-    const bidders = await getBiddersForDivision(division, config, observations);
-    if (!bidders.length) { out.divisions[division] = { cells: {}, computedAt: Date.now(), note: 'No linked subs with bid history in this division yet.' }; continue; }
+    const bidders = await getBiddersForDivision(division, config, observations, excludeSet);
+    if (!bidders.length) { out.divisions[division] = { cells: {}, computedAt: Date.now(), note: 'No linked subs with bid history in this division yet (or all are filtered out above).' }; continue; }
 
     // Default grid extent scales with how far this division's coverage can
     // actually reach — otherwise a wide outer radius gets clipped by the
@@ -1342,7 +1351,7 @@ app.get('/api/coverage-depth', async (req, res) => {
       return res.status(400).json({ error: `Grid too large (${cells.length} cells) even at the coarsest resolution for ${Math.round(padMiles)}mi padding — try a smaller grid extent.` });
     }
 
-    const cacheId = `${division}:${usedResolution}:${Math.round(padMiles)}`;
+    const cacheId = `${division}:${usedResolution}:${Math.round(padMiles)}:${excludeTag}`;
     const cached = await new Promise(resolve => db.coverageDepthCache.findOne({ _id: cacheId }, (err, doc) => resolve(doc)));
     if (cached) { out.divisions[division] = { cells: cached.cells, computedAt: cached.computedAt, padMiles, resolution: usedResolution }; continue; }
 
