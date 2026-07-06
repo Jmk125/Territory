@@ -248,6 +248,9 @@
     .bidcov-tab { flex: 1; overflow-y: auto; padding: 20px 28px; max-width: 1100px; margin: 0 auto; width: 100%; }
     .bidcov-section { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px 18px; margin-bottom: 18px; }
     .bidcov-section-header { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
+    .bidcov-arrow { display: inline-block; width: 0.9em; color: var(--text2); }
+    .bc-audit-row { cursor: pointer; }
+    .bc-audit-row:hover { background: var(--surface2); }
     .bidcov-section-header h3 { font-size: 0.95rem; margin: 0; }
     .bidcov-section-header > input[type=text] { margin-left: auto; width: 220px; }
     .bc-table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
@@ -818,27 +821,50 @@
         <button class="btn btn-ghost btn-sm" id="bc-resync-btn" onclick="runBidderResync()">🔁 Re-match Subcontractors</button>
         <span class="hint">Clears any bidder link pointing at a location that no longer exists (e.g. after a batch re-import) and re-attempts matching.</span>
       </div>
+      <div class="row" style="gap:6px; align-items:center; margin-top:8px">
+        <label class="field-label" style="margin-bottom:0">Only use bids from the last</label>
+        <input type="number" id="bc-recency-years" min="1" max="50" placeholder="all" style="width:56px" oninput="this.dataset.dirty='1'">
+        <label class="field-label" style="margin-bottom:0">year(s)</label>
+        <button class="btn btn-ghost btn-sm" onclick="saveBidRecency()">Apply</button>
+        <span class="hint">Recomputes immediately from the existing cache — no new sync needed. Leave blank for all time.</span>
+      </div>
       <div id="bc-sync-status" class="hint" style="margin-top:6px"></div>
     </div>
 
     <div class="bidcov-section">
-      <div class="bidcov-section-header">
-        <h3>Divisions</h3>
+      <div class="bidcov-section-header" onclick="toggleBidcovSection(event, 'divisions')" style="cursor:pointer">
+        <h3><span class="bidcov-arrow" id="bidcov-arrow-divisions">▸</span> Divisions</h3>
         <span class="hint">Rename a division's display label or set its target bidder count — both persist across syncs.</span>
       </div>
-      <div id="bc-divisions-table"><span class="hint">Sync bid data to see divisions.</span></div>
+      <div class="bidcov-section-body" id="bidcov-body-divisions" style="display:none">
+        <div id="bc-divisions-table"><span class="hint">Sync bid data to see divisions.</span></div>
+      </div>
+    </div>
+
+    <div class="bidcov-section">
+      <div class="bidcov-section-header" onclick="toggleBidcovSection(event, 'links')" style="cursor:pointer">
+        <h3><span class="bidcov-arrow" id="bidcov-arrow-links">▸</span> Bidder Links <span class="hint" id="bc-links-count"></span></h3>
+        <div style="margin-left:auto; display:flex; gap:8px; align-items:center" onclick="event.stopPropagation()">
+          <select id="bc-links-division-filter" onchange="renderBidderLinksTable()"><option value="">All divisions</option></select>
+          <button class="btn btn-success btn-sm" id="bc-saveall-btn" onclick="saveAllBidderLinks()">💾 Save All Visible</button>
+          <input type="text" id="bc-links-filter" placeholder="Filter by name…" style="width:150px" oninput="renderBidderLinksTable()">
+        </div>
+      </div>
+      <div class="bidcov-section-body" id="bidcov-body-links" style="display:none">
+        <div class="hint" style="margin-bottom:8px">"Save All Visible" confirms every unconfirmed row's current selection (including pre-filled guesses) at once — skims through and Skip/change any that look wrong first.</div>
+        <div id="bc-links-table"><span class="hint">Sync bid data to see bidders.</span></div>
+      </div>
     </div>
 
     <div class="bidcov-section">
       <div class="bidcov-section-header">
-        <h3>Bidder Links <span class="hint" id="bc-links-count"></span></h3>
+        <h3>Linked Contractors <span class="hint" id="bc-linked-count"></span></h3>
         <div style="margin-left:auto; display:flex; gap:8px; align-items:center">
-          <button class="btn btn-success btn-sm" id="bc-saveall-btn" onclick="saveAllBidderLinks()">💾 Save All Visible</button>
-          <input type="text" id="bc-links-filter" placeholder="Filter by name…" style="width:180px" oninput="renderBidderLinksTable()">
+          <select id="bc-linked-division-filter" onchange="renderLinkedContractorsTable()"><option value="">All divisions</option></select>
         </div>
       </div>
-      <div class="hint" style="margin-bottom:8px">"Save All Visible" confirms every unconfirmed row's current selection (including pre-filled guesses) at once — skims through and Skip/change any that look wrong first.</div>
-      <div id="bc-links-table"><span class="hint">Sync bid data to see bidders.</span></div>
+      <div class="hint" style="margin-bottom:8px">Every confirmed, located contractor that actually feeds the coverage-depth map. Click a row to see the bids and calculations behind their radius/weight.</div>
+      <div id="bc-linked-table"><span class="hint">Sync bid data to see linked contractors.</span></div>
     </div>
 
     <div class="bidcov-section">
@@ -1457,9 +1483,65 @@ async function renderBidCoverageTab() {
       status.style.color = bidDbSettings.lastSyncOk === false ? 'var(--danger)' : 'var(--text2)';
     }
   }
+  const recencyInput = document.getElementById('bc-recency-years');
+  if (recencyInput && !recencyInput.dataset.dirty) {
+    try { const r = await fetch('/api/bid-recency').then(r => r.json()); recencyInput.value = r.years || ''; } catch (e) {}
+  }
+  restoreBidcovSectionState('divisions', true);
+  restoreBidcovSectionState('links', true);
+  populateBidcovDivisionFilters();
   renderDivisionsTable();
   await renderBidderLinksTable();
+  await renderLinkedContractorsTable();
   await renderOverridesTable();
+}
+
+function populateBidcovDivisionFilters() {
+  const divs = (coverageConfig && coverageConfig.config && coverageConfig.config.divisions) || {};
+  const codes = Object.keys(divs).sort();
+  const optsHtml = '<option value="">All divisions</option>' + codes.map(c => `<option value="${c}">${c} ${escapeHtml(divs[c].name || '')}</option>`).join('');
+  for (const id of ['bc-links-division-filter', 'bc-linked-division-filter']) {
+    const el = document.getElementById(id);
+    if (el && el.dataset.built !== JSON.stringify(codes)) {
+      const current = el.value;
+      el.innerHTML = optsHtml;
+      el.value = current;
+      el.dataset.built = JSON.stringify(codes);
+    }
+  }
+}
+
+// ── Collapsible sections (Divisions / Bidder Links) ─────────────────
+function toggleBidcovSection(evt, id) {
+  if (evt) evt.stopPropagation();
+  const body = document.getElementById('bidcov-body-' + id);
+  if (!body) return;
+  const collapsed = body.style.display !== 'none';
+  body.style.display = collapsed ? 'none' : '';
+  const arrow = document.getElementById('bidcov-arrow-' + id);
+  if (arrow) arrow.textContent = collapsed ? '▸' : '▾';
+  try { localStorage.setItem('bidcovCollapsed_' + id, collapsed ? '1' : '0'); } catch (e) {}
+}
+function restoreBidcovSectionState(id, defaultCollapsed) {
+  let collapsed = defaultCollapsed;
+  try { const saved = localStorage.getItem('bidcovCollapsed_' + id); if (saved != null) collapsed = saved === '1'; } catch (e) {}
+  const body = document.getElementById('bidcov-body-' + id);
+  const arrow = document.getElementById('bidcov-arrow-' + id);
+  if (body) body.style.display = collapsed ? 'none' : '';
+  if (arrow) arrow.textContent = collapsed ? '▸' : '▾';
+}
+
+async function saveBidRecency() {
+  const input = document.getElementById('bc-recency-years');
+  const years = input && input.value ? input.value : '';
+  await fetch('/api/bid-recency', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ years })
+  });
+  if (input) delete input.dataset.dirty;
+  const status = document.getElementById('bc-sync-status');
+  if (status) { status.textContent = years ? `🟢 Now using bids from the last ${years} year(s) only.` : '🟢 Now using all bid history.'; status.style.color = 'var(--success)'; }
+  await renderBidCoverageTab();
+  if (depthEnabled) await renderDepthLayer(true);
 }
 
 async function saveBidDbSettingsTab() {
@@ -1611,7 +1693,9 @@ async function renderBidderLinksTable() {
     try { bidderLinksAll = await fetch('/api/bidder-links?all=true').then(r => r.json()); } catch (e) { bidderLinksAll = []; }
   }
   const q = (document.getElementById('bc-links-filter')?.value || '').trim().toLowerCase();
-  const list = q ? bidderLinksAll.filter(b => b.bidderName.toLowerCase().includes(q)) : bidderLinksAll;
+  const divFilter = document.getElementById('bc-links-division-filter')?.value || '';
+  let list = q ? bidderLinksAll.filter(b => b.bidderName.toLowerCase().includes(q)) : bidderLinksAll;
+  if (divFilter) list = list.filter(b => (b.divisionOverride || (b.divisions || [])[0]) === divFilter || (b.divisions || []).includes(divFilter));
   if (countEl) countEl.textContent = `(${bidderLinksAll.length} total, ${bidderLinksAll.filter(b => !b.confirmed).length} need review)`;
   if (!list.length) { host.innerHTML = '<span class="hint">Sync bid data to see bidders.</span>'; return; }
   host.innerHTML = `<table class="bc-table"><thead><tr>
@@ -1707,6 +1791,106 @@ async function saveAllBidderLinks() {
 }
 
 // ── Manual bidder overrides table ───────────────────────────────────
+// ── Linked Contractors (the roster that actually feeds the map) ────
+let linkedContractorsAll = [];
+
+async function renderLinkedContractorsTable() {
+  const host = document.getElementById('bc-linked-table');
+  const countEl = document.getElementById('bc-linked-count');
+  if (!host) return;
+  try { linkedContractorsAll = await fetch('/api/linked-contractors').then(r => r.json()); } catch (e) { linkedContractorsAll = []; }
+  const divFilter = document.getElementById('bc-linked-division-filter')?.value || '';
+  const list = divFilter ? linkedContractorsAll.filter(c => c.divisions.includes(divFilter)) : linkedContractorsAll;
+  if (countEl) countEl.textContent = `(${linkedContractorsAll.length} total)`;
+  if (!list.length) { host.innerHTML = '<span class="hint">No linked contractors yet — confirm some bidder links above.</span>'; return; }
+  const divs = (coverageConfig && coverageConfig.config && coverageConfig.config.divisions) || {};
+  const divLabel = c => c.divisions.map(d => d).join(', ');
+  host.innerHTML = `<table class="bc-table"><thead><tr>
+      <th>Contractor</th><th>Location</th><th>Divisions</th><th>Weight</th><th>Flags</th><th>Custom radius</th>
+    </tr></thead><tbody>
+    ${list.map(c => {
+      const flags = [c.medianSupportOnly ? 'support-only' : '', c.ignoreDistanceDecay ? 'ignores distance' : ''].filter(Boolean).join(', ') || '—';
+      return `<tr class="bc-audit-row" onclick="openBidderAudit('${encodeURIComponent(c.bidderName)}')">
+        <td class="bc-name-cell" title="${escapeHtml(c.bidderName)}">${escapeHtml(c.bidderName)}</td>
+        <td class="bc-name-cell" title="${escapeHtml(c.locationName || '')}">${escapeHtml(c.locationName || '—')}</td>
+        <td>${escapeHtml(divLabel(c))}</td>
+        <td>${c.weightMultiplier != null ? c.weightMultiplier : '1.0'}</td>
+        <td>${escapeHtml(flags)}</td>
+        <td>${c.customCompetitiveRadiusMi != null ? c.customCompetitiveRadiusMi + ' mi' : '—'}</td>
+      </tr>`;
+    }).join('')}
+  </tbody></table>`;
+}
+
+const BC_BAND_LABELS = { '0_15mi': '0–15 mi', '15_30mi': '15–30 mi', '30_50mi': '30–50 mi', '50plus_mi': '50+ mi' };
+function bcBandTableHtml(ownBandStats) {
+  return `<table class="bc-table" style="margin-top:6px"><thead><tr>
+      <th>Band</th><th>N</th><th>Median dev</th><th>Win rate</th>
+    </tr></thead><tbody>
+    ${ownBandStats.map(b => `<tr>
+      <td>${BC_BAND_LABELS[b.band] || b.band}</td>
+      <td>${b.n}</td>
+      <td>${b.medianDevPct != null ? b.medianDevPct + '%' : '—'}</td>
+      <td>${b.winRate != null ? Math.round(b.winRate * 100) + '%' : '—'}</td>
+    </tr>`).join('')}
+  </tbody></table>`;
+}
+
+function bcBidsTableHtml(bids) {
+  if (!bids.length) return '<div class="hint">No bid history for this division.</div>';
+  return `<table class="bc-table" style="margin-top:6px"><thead><tr>
+      <th>Project</th><th>Date</th><th>Miles</th><th>Minutes</th><th>Basis</th><th>Dev %</th><th>Won</th><th># bids</th>
+    </tr></thead><tbody>
+    ${bids.map(b => `<tr>
+      <td class="bc-name-cell" title="${escapeHtml(b.project || '')}">${escapeHtml(b.project || '—')}</td>
+      <td>${escapeHtml(b.projectDate || '—')}</td>
+      <td>${b.miles != null ? b.miles : '—'}</td>
+      <td>${b.minutes != null ? b.minutes : '—'}</td>
+      <td>${escapeHtml(b.basis || '—')}</td>
+      <td>${b.devPct != null ? b.devPct + '%' : '(n<3, no median)'}</td>
+      <td>${b.won ? '✓' : ''}</td>
+      <td>${b.nBidsInPackage}</td>
+    </tr>`).join('')}
+  </tbody></table>`;
+}
+
+async function openBidderAudit(encodedName) {
+  const bidderName = decodeURIComponent(encodedName);
+  let audit;
+  try {
+    const r = await fetch(`/api/bidder-audit/${encodeURIComponent(bidderName)}`);
+    audit = await r.json();
+    if (!r.ok) { openModal('Bidder Audit', `<div class="hint">${escapeHtml(audit.error || 'Could not load audit data.')}</div>`); return; }
+  } catch (e) {
+    openModal('Bidder Audit', `<div class="hint">Could not load audit data: ${escapeHtml(e.message)}</div>`);
+    return;
+  }
+  const divCodes = Object.keys(audit.divisions).sort();
+  const body = `
+    <div class="hint" style="margin-bottom:12px">Location: ${escapeHtml(audit.location.name)} (${audit.location.lat.toFixed(4)}, ${audit.location.lng.toFixed(4)})</div>
+    ${divCodes.map(code => {
+      const d = audit.divisions[code];
+      if (d.alwaysCovered) {
+        return `<div class="bidcov-section" style="margin-bottom:14px"><h3>${code} ${escapeHtml(d.name)}</h3><div class="hint">Distance-blind division — always counted as covered, not part of the depth map.</div></div>`;
+      }
+      return `<div class="bidcov-section" style="margin-bottom:14px">
+        <h3>${code} ${escapeHtml(d.name)}</h3>
+        <div class="hint">Trade default: competitive ${d.tradeCompetitiveRadiusMi}mi / outer ${d.tradeOuterRadiusMi}mi (tier: ${escapeHtml(d.tradeTier || '')})</div>
+        <div style="margin-top:6px"><b>Effective for this contractor:</b> competitive ${d.effective.competitiveRadiusMi}mi / outer ${d.effective.outerRadiusMi}mi,
+          weight ${d.effective.weightMultiplier}${d.effective.medianSupportOnly ? ', median-support-only' : ''}${d.effective.ignoreDistanceDecay ? ', ignores distance decay' : ''}
+          <span class="hint">(${escapeHtml(d.effective.source)})</span>
+        </div>
+        <div style="margin-top:6px" class="hint">This contractor's own crossover (if enough of their own data): competitive ~${d.ownCrossover.competitiveRadiusMi != null ? d.ownCrossover.competitiveRadiusMi + 'mi (n=' + d.ownCrossover.competitiveSupportN + ')' : 'not enough data'}, outer ~${d.ownCrossover.outerRadiusMi != null ? d.ownCrossover.outerRadiusMi + 'mi (n=' + d.ownCrossover.outerSupportN + ')' : 'not enough data'}</div>
+        <div class="section-divider">Own band stats (${d.usableCount} usable bids)</div>
+        ${bcBandTableHtml(d.ownBandStats)}
+        <div class="section-divider">All bids in this division (${d.bids.length})</div>
+        ${bcBidsTableHtml(d.bids)}
+      </div>`;
+    }).join('')}
+  `;
+  openModal(`📋 ${escapeHtml(bidderName)}`, body, { wide: true });
+}
+
 async function renderOverridesTable() {
   const host = document.getElementById('bc-overrides-table');
   if (!host) return;
