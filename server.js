@@ -1566,6 +1566,35 @@ app.get('/api/coverage-depth', async (req, res) => {
   res.json(out);
 });
 
+// Full (untruncated) per-division contributor detail for exactly one cell —
+// the bulk grid response above caps each cell's contributor list short to
+// keep the whole-grid payload/cache size sane across thousands of cells, so
+// a cell click fetches this instead of relying on that truncated list.
+app.get('/api/coverage-depth/cell/:cellId', async (req, res) => {
+  const cellId = req.params.cellId;
+  const divisions = String(req.query.divisions || '').split(',').map(s => s.trim()).filter(Boolean);
+  if (!divisions.length) return res.status(400).json({ error: 'divisions query param required (comma-separated CSI codes)' });
+  const excludeSet = req.query.excludeBidders
+    ? new Set(String(req.query.excludeBidders).split(',').filter(Boolean).map(decodeURIComponent))
+    : null;
+
+  const configDoc = await getCoverageConfigDoc();
+  const config = configDoc ? configDoc.config : BUNDLED_CONFIG;
+  if (!config) return res.status(503).json({ error: 'No coverage config available yet — run a bid-data sync first.' });
+  const observations = await getEffectiveObservations();
+
+  const out = {};
+  for (const division of divisions) {
+    const divCfg = config.divisions[division];
+    if (!divCfg || divCfg.always_covered) { out[division] = { alwaysCovered: true }; continue; }
+    const bidders = await getBiddersForDivision(division, config, observations, excludeSet);
+    if (!bidders.length) { out[division] = { depth: 0, secondaryDepth: 0, contributors: [] }; continue; }
+    const depths = coverageDepthLib.computeDivisionDepth([cellId], bidders, divCfg, null);
+    out[division] = depths[cellId] || { depth: 0, secondaryDepth: 0, contributors: [] };
+  }
+  res.json(out);
+});
+
 // ─── Linked contractors (the roster that actually feeds the map) ───
 // Every confirmed, located bidder, with the divisions they contribute to
 // and the effective radius/weight/flags applied for each — a quick roster
