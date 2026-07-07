@@ -489,6 +489,16 @@
     .modal-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
     .modal-tab .tab-badge { display: inline-block; min-width: 16px; padding: 0 5px; margin-left: 5px; border-radius: 9px; background: var(--success); color: #fff; font-size: 0.66rem; line-height: 16px; text-align: center; }
 
+    /* ── COVERAGE-DEPTH CELL-DETAIL MODAL ── */
+    .depth-cell-modal { display: flex; flex-direction: column; gap: 8px; }
+    .depth-cell-row { border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; background: var(--surface2); }
+    .depth-cell-row-head { display: flex; align-items: center; gap: 6px; font-size: 0.85rem; }
+    .depth-cell-swatch { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+    .depth-cell-num { font-variant-numeric: tabular-nums; font-size: 0.8rem; color: var(--text2); white-space: nowrap; }
+    .depth-chip-row { display: flex; flex-wrap: wrap; gap: 4px 6px; margin-top: 6px; }
+    .depth-chip { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 2px 8px; font-size: 0.72rem; }
+    .depth-chip .hint { margin-left: 2px; }
+
     /* ── BATCH IMPORT ── */
     .batch-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
     .batch-grid .field-label { margin-top: 0; }
@@ -2332,7 +2342,7 @@ function drawDepthCells(divisions) {
       color: depthCellColor(composite), weight: 1, opacity: 0.5,
       fillColor: depthCellColor(composite), fillOpacity: 0.45
     }).addTo(depthLayer);
-    poly.on('click', () => showDepthCellPopup(poly, id, divisions));
+    poly.on('click', () => showDepthCellPopup(id, divisions));
   }
   renderDepthLegend(divisions);
   drawDepthContour(cellIds, divisions);
@@ -2357,16 +2367,40 @@ function renderDepthLegend(divisions) {
     </div>${note ? `<div style="margin-top:3px">${escapeHtml(note)}</div>` : ''}`;
 }
 
-function showDepthCellPopup(poly, cellId, divisions) {
-  const lines = divisions.map(code => {
+// A Leaflet popup bubble doesn't scroll and has nowhere to grow when every
+// division is checked, so this uses the app's regular modal (already
+// scrollable up to 90vh, closeable via button/backdrop/Escape) instead.
+function showDepthCellPopup(cellId, divisions) {
+  const composite = depthCompositeAt(cellId, divisions);
+  const ruleLabel = depthRule === 'average' ? 'average' : 'minimum — limiting division';
+  const rows = divisions.map(code => {
     const d = depthData.divisions[code];
     const cell = d && d.cells && d.cells[cellId];
     const name = (coverageConfig.config.divisions[code] || {}).name || code;
-    if (!cell) return `<div><b>${escapeHtml(name)}</b>: no data</div>`;
-    const contributors = (cell.contributors || []).map(c => `${escapeHtml(c.name)} (${c.weight})`).join(', ') || 'none';
-    return `<div style="margin-bottom:4px"><b>${escapeHtml(name)}</b>: depth ${cell.depth}${cell.secondaryDepth ? ` (+${cell.secondaryDepth} support-only)` : ''}<br><span class="hint">${contributors}</span></div>`;
+    if (!cell) {
+      return `<div class="depth-cell-row">
+        <div class="depth-cell-row-head"><span class="depth-cell-swatch" style="background:#555"></span><b>${code} ${escapeHtml(name)}</b><span class="hint" style="margin-left:auto">no data</span></div>
+      </div>`;
+    }
+    const target = depthTargets[code] || 1;
+    const ratio = cell.depth / target;
+    const chips = (cell.contributors || []).length
+      ? cell.contributors.map(c => `<span class="depth-chip">${escapeHtml(c.name)} <span class="hint">${c.weight}</span></span>`).join('')
+      : '<span class="hint">no contributors</span>';
+    return `<div class="depth-cell-row">
+      <div class="depth-cell-row-head">
+        <span class="depth-cell-swatch" style="background:${depthCellColor(ratio)}"></span>
+        <b>${code} ${escapeHtml(name)}</b>
+        <span class="depth-cell-num" style="margin-left:auto">${cell.depth}${cell.secondaryDepth ? ` <span class="hint">(+${cell.secondaryDepth} support)</span>` : ''} / ${target}</span>
+      </div>
+      <div class="depth-chip-row">${chips}</div>
+    </div>`;
   }).join('');
-  poly.bindPopup(`<div style="max-width:240px">${lines}</div>`).openPopup();
+  openModal(
+    `Coverage Depth <span class="hint" style="font-weight:400;font-size:0.75rem;display:block;margin-top:2px">${divisions.length} division${divisions.length !== 1 ? 's' : ''} · composite ${Math.round(composite * 100) / 100} (${ruleLabel})</span>`,
+    `<div class="depth-cell-modal">${rows}</div>
+     <div class="row" style="margin-top:14px"><button class="btn btn-ghost" onclick="closeModal()">Close</button></div>`
+  );
 }
 
 // Contour at the depth==target boundary — "a project inside this line can
