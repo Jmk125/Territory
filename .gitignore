@@ -10,4 +10,5 @@ data/coverageDepthCache.db
 data/projectLocations.db
 data/divisionOverrides.db
 data/bidderDivisionOverrides.db
+data/bidderAliases.db
 .env
