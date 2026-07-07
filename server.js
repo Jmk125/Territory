@@ -45,7 +45,10 @@ const db = {
   divisionOverrides: new Datastore({ filename: path.join(__dirname, 'data/divisionOverrides.db'), autoload: true }),
   // Forces a bidder's observations into a specific division, for cases where
   // the Bid Database's csi_division tag is wrong/too coarse for that bidder.
-  bidderDivisionOverrides: new Datastore({ filename: path.join(__dirname, 'data/bidderDivisionOverrides.db'), autoload: true })
+  bidderDivisionOverrides: new Datastore({ filename: path.join(__dirname, 'data/bidderDivisionOverrides.db'), autoload: true }),
+  // Folds a duplicate bidder name (aliasName) into a canonical one — survives
+  // future syncs even if the Bid Database still reports them separately.
+  bidderAliases: new Datastore({ filename: path.join(__dirname, 'data/bidderAliases.db'), autoload: true })
 };
 
 app.use(express.json({ limit: '50mb' }));
@@ -774,6 +777,11 @@ function getBidderDivisionOverrideMap() {
 function getDivisionNameOverrideMap() {
   return new Promise(resolve => db.divisionOverrides.find({}, (err, docs) => resolve(new Map((docs || []).map(d => [d.division, d.name])))));
 }
+// aliasName -> canonicalName, flattened at write-time (see /api/bidders/merge)
+// so this never needs to walk a chain — one lookup always resolves fully.
+function getBidderAliasMap() {
+  return new Promise(resolve => db.bidderAliases.find({}, (err, docs) => resolve(new Map((docs || []).map(d => [d.aliasName, d.canonicalName])))));
+}
 
 // The cached observations, with any manual bidder->division reassignment
 // applied. This is the single point where that override takes effect, so
@@ -831,6 +839,7 @@ app.post('/api/derivation-thresholds', async (req, res) => {
 async function getEffectiveObservations() {
   const cache = await getCachedObservations();
   if (!cache) return [];
+  const aliasMap = await getBidderAliasMap();
   const overrides = await getBidderDivisionOverrideMap();
   const years = await getBidRecencyYears();
   const cutoff = years ? Date.now() - years * 365.25 * 24 * 3600 * 1000 : null;
@@ -839,6 +848,14 @@ async function getEffectiveObservations() {
       if (!cutoff) return true;
       const t = o.project_date ? new Date(o.project_date).getTime() : NaN;
       return Number.isNaN(t) || t >= cutoff; // unparseable/missing date -> keep it, don't discard data we can't classify
+    })
+    .map(o => {
+      // Merged bidders: rewrite to the canonical name before anything else
+      // (division overrides, entity resolution, derivation) sees it, so a
+      // merge sticks across syncs even if the Bid Database still reports
+      // the two names separately.
+      const canonical = aliasMap.get(o.bidder);
+      return canonical ? { ...o, bidder: canonical } : o;
     })
     .flatMap(o => {
       const forced = overrides.get(o.bidder);
@@ -1084,6 +1101,97 @@ app.post('/api/bidder-division-overrides/:bidderName', async (req, res) => {
 });
 app.delete('/api/bidder-division-overrides/:bidderName', async (req, res) => {
   db.bidderDivisionOverrides.remove({ bidderName: req.params.bidderName }, {}, async (err) => {
+    if (err) return res.status(500).json({ error: err.message });
+    await reDeriveIfPossible();
+    res.json({ ok: true });
+  });
+});
+
+// ─── Bidder merge (duplicate-name cleanup) ──────────────────────────
+// Folds one bidder name into another. Unlike a Bid-Database-side rename,
+// this takes effect immediately and survives future syncs even if the
+// source data still reports the two names separately — getEffectiveObservations()
+// rewrites the loser's bids to the survivor's name before anything else
+// (division overrides, entity resolution, derivation) sees them.
+app.post('/api/bidders/merge', async (req, res) => {
+  const loserName = String(req.body.loserName || '').trim();
+  const survivorNameRaw = String(req.body.survivorName || '').trim();
+  if (!loserName || !survivorNameRaw) return res.status(400).json({ error: 'loserName and survivorName required' });
+  if (loserName === survivorNameRaw) return res.status(400).json({ error: 'Cannot merge a bidder into itself' });
+
+  const aliasMap = await getBidderAliasMap();
+  // Resolve the survivor through any existing chain, in case it was itself
+  // already merged into something else — merges always flatten to one hop.
+  const survivorName = aliasMap.get(survivorNameRaw) || survivorNameRaw;
+  if (survivorName === loserName) return res.status(400).json({ error: 'That would create a merge cycle' });
+
+  // Anything that currently resolves to the loser (a prior merge chained
+  // through it) now needs to resolve to the new final target instead.
+  const repointed = [...aliasMap.entries()].filter(([, canon]) => canon === loserName).map(([alias]) => alias);
+  for (const alias of repointed) {
+    await new Promise(resolve => db.bidderAliases.update({ aliasName: alias }, { $set: { canonicalName: survivorName } }, {}, () => resolve()));
+  }
+  await new Promise(resolve => db.bidderAliases.update(
+    { aliasName: loserName }, { aliasName: loserName, canonicalName: survivorName, updatedAt: Date.now() }, { upsert: true }, () => resolve()
+  ));
+
+  // Migrate settings keyed to the loser's name — survivor's existing values
+  // win on conflict, loser only fills in what the survivor doesn't have.
+  const [loserLink, survivorLink] = await Promise.all([
+    new Promise(resolve => db.bidderLinks.findOne({ bidderName: loserName }, (e, d) => resolve(d))),
+    new Promise(resolve => db.bidderLinks.findOne({ bidderName: survivorName }, (e, d) => resolve(d)))
+  ]);
+  if (loserLink && loserLink.locationId && (!survivorLink || !survivorLink.locationId)) {
+    await new Promise(resolve => db.bidderLinks.update(
+      { bidderName: survivorName },
+      { bidderName: survivorName, locationId: loserLink.locationId, method: loserLink.method, confirmed: loserLink.confirmed, updatedAt: Date.now() },
+      { upsert: true }, () => resolve()
+    ));
+  }
+  await new Promise(resolve => db.bidderLinks.remove({ bidderName: loserName }, {}, () => resolve()));
+
+  const [loserOv, survivorOv] = await Promise.all([
+    new Promise(resolve => db.bidderOverrides.findOne({ bidderName: loserName }, (e, d) => resolve(d))),
+    new Promise(resolve => db.bidderOverrides.findOne({ bidderName: survivorName }, (e, d) => resolve(d)))
+  ]);
+  if (loserOv) {
+    const { _id, bidderName, updatedAt, ...loserFields } = loserOv;
+    const { _id: sId, bidderName: sName, updatedAt: sAt, ...survivorFields } = survivorOv || {};
+    await new Promise(resolve => db.bidderOverrides.update(
+      { bidderName: survivorName },
+      { bidderName: survivorName, ...loserFields, ...survivorFields, updatedAt: Date.now() },
+      { upsert: true }, () => resolve()
+    ));
+    await new Promise(resolve => db.bidderOverrides.remove({ bidderName: loserName }, {}, () => resolve()));
+  }
+
+  const [loserDiv, survivorDiv] = await Promise.all([
+    new Promise(resolve => db.bidderDivisionOverrides.findOne({ bidderName: loserName }, (e, d) => resolve(d))),
+    new Promise(resolve => db.bidderDivisionOverrides.findOne({ bidderName: survivorName }, (e, d) => resolve(d)))
+  ]);
+  if (loserDiv) {
+    const divisions = [...new Set([...((survivorDiv && survivorDiv.divisions) || []), ...(loserDiv.divisions || [])])];
+    if (divisions.length) {
+      await new Promise(resolve => db.bidderDivisionOverrides.update(
+        { bidderName: survivorName }, { bidderName: survivorName, divisions, updatedAt: Date.now() }, { upsert: true }, () => resolve()
+      ));
+    }
+    await new Promise(resolve => db.bidderDivisionOverrides.remove({ bidderName: loserName }, {}, () => resolve()));
+  }
+
+  await reDeriveIfPossible();
+  res.json({ ok: true, loserName, survivorName });
+});
+
+app.get('/api/bidders/aliases', (req, res) => {
+  db.bidderAliases.find({}).sort({ updatedAt: -1 }).exec((err, docs) => {
+    if (err) return res.status(500).json({ error: err.message });
+    res.json((docs || []).map(({ aliasName, canonicalName, updatedAt }) => ({ aliasName, canonicalName, updatedAt })));
+  });
+});
+
+app.delete('/api/bidders/aliases/:aliasName', async (req, res) => {
+  db.bidderAliases.remove({ aliasName: req.params.aliasName }, {}, async (err) => {
     if (err) return res.status(500).json({ error: err.message });
     await reDeriveIfPossible();
     res.json({ ok: true });

@@ -270,6 +270,8 @@
     .bc-tag { display: inline-block; font-size: 0.65rem; padding: 1px 6px; border-radius: 8px; background: var(--surface2); color: var(--text2); margin-left: 4px; }
     .bc-tag.warn { color: var(--accent2); }
     .bc-tag.ok { color: var(--success); }
+    .bc-tag a { color: var(--danger); text-decoration: none; margin-left: 3px; }
+    .bc-tag a:hover { text-decoration: underline; }
     .bc-div-checks { display: flex; flex-wrap: wrap; gap: 1px 8px; max-width: 210px; max-height: 64px; overflow-y: auto; background: var(--surface2); border: 1px solid var(--border); border-radius: 6px; padding: 3px 6px; }
     .bc-div-checks label { display: flex; align-items: center; gap: 2px; font-size: 0.7rem; white-space: nowrap; cursor: pointer; }
     .bc-div-checks input[type=checkbox] { accent-color: var(--accent); margin: 0; }
@@ -900,6 +902,15 @@
       </div>
       <div class="bidcov-section-body" id="bidcov-body-links" style="display:none">
         <div class="hint" style="margin-bottom:8px">"Save All Visible" confirms every unconfirmed row's current selection (including pre-filled guesses) at once — skims through and Skip/change any that look wrong first.</div>
+        <div class="row bc-merge-row" style="gap:8px; align-items:center; margin-bottom:10px; flex-wrap:wrap">
+          <label class="field-label" style="margin-bottom:0">Merge</label>
+          <select id="bc-merge-loser" style="max-width:220px"></select>
+          <span class="hint">into</span>
+          <select id="bc-merge-survivor" style="max-width:220px"></select>
+          <button class="btn btn-ghost btn-sm" onclick="mergeBidders()">🔗 Merge</button>
+          <span class="hint">Combines two names Territory sees as different bidders (e.g. spreadsheet-naming duplicates) — sticks across future syncs even if your Bid Database still has them separate.</span>
+        </div>
+        <div id="bc-merged-list" style="margin-bottom:8px"></div>
         <div id="bc-links-table"><span class="hint">Sync bid data to see bidders.</span></div>
       </div>
     </div>
@@ -1862,6 +1873,66 @@ async function renderBidderLinksTable() {
       </tr>`;
     }).join('')}
   </tbody></table>`;
+  populateMergeSelects();
+  await renderMergedBiddersList();
+}
+
+// ── Merge bidders: fold a duplicate name into another (survives future
+// syncs even if the Bid Database still has them as separate names) ────
+function populateMergeSelects() {
+  const loserSel = document.getElementById('bc-merge-loser');
+  const survivorSel = document.getElementById('bc-merge-survivor');
+  if (!loserSel || !survivorSel) return;
+  const names = [...bidderLinksAll].sort((a, b) => a.bidderName.localeCompare(b.bidderName));
+  const key = JSON.stringify(names.map(b => b.bidderName));
+  if (loserSel.dataset.built === key) return;   // don't clobber an in-progress pick on every re-render
+  const optsHtml = names.map(b =>
+    `<option value="${escapeHtml(b.bidderName)}">${escapeHtml(b.bidderName)} (${b.bidCount} bid${b.bidCount === 1 ? '' : 's'})</option>`
+  ).join('');
+  loserSel.innerHTML = optsHtml;
+  survivorSel.innerHTML = optsHtml;
+  loserSel.dataset.built = key;
+  survivorSel.dataset.built = key;
+}
+
+async function mergeBidders() {
+  const loserName = document.getElementById('bc-merge-loser')?.value;
+  const survivorName = document.getElementById('bc-merge-survivor')?.value;
+  if (!loserName || !survivorName) return;
+  if (loserName === survivorName) { alert('Pick two different bidders to merge.'); return; }
+  if (!confirm(`Merge "${loserName}" into "${survivorName}"?\n\nAll of "${loserName}"'s bids (past and future, even after your next Bid Database sync) will count as "${survivorName}" from now on, and any location link or manual settings on "${loserName}" fold into "${survivorName}". You can undo this from the merged list below, but folded-in settings won't automatically split back apart.`)) return;
+  const r = await fetch('/api/bidders/merge', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ loserName, survivorName })
+  }).then(r => r.json());
+  if (!r.ok) { alert(r.error || 'Merge failed.'); return; }
+  bidderLinksAll = [];
+  const loserSel = document.getElementById('bc-merge-loser');
+  if (loserSel) delete loserSel.dataset.built;   // force the selects to rebuild post-merge
+  await refreshBidCovStatus();
+  await renderBidderLinksTable();
+  if (depthEnabled) await renderDepthLayer(true);
+}
+
+async function renderMergedBiddersList() {
+  const host = document.getElementById('bc-merged-list');
+  if (!host) return;
+  let aliases = [];
+  try { aliases = await fetch('/api/bidders/aliases').then(r => r.json()); } catch (e) {}
+  if (!aliases.length) { host.innerHTML = ''; return; }
+  host.innerHTML = '<span class="hint">Merged:</span> ' + aliases.map(a =>
+    `<span class="bc-tag ok">${escapeHtml(a.aliasName)} → ${escapeHtml(a.canonicalName)} <a href="#" onclick="event.preventDefault(); undoBidderMerge('${escapeHtml(a.aliasName)}')" title="Undo this merge">✕</a></span>`
+  ).join(' ');
+}
+
+async function undoBidderMerge(aliasName) {
+  if (!confirm(`Undo merging "${aliasName}"? It starts counting as its own bidder again on the next sync — but any settings that were folded into the other bidder at merge time stay folded in; this doesn't split those back apart.`)) return;
+  await fetch(`/api/bidders/aliases/${encodeURIComponent(aliasName)}`, { method: 'DELETE' });
+  bidderLinksAll = [];
+  const loserSel = document.getElementById('bc-merge-loser');
+  if (loserSel) delete loserSel.dataset.built;
+  await refreshBidCovStatus();
+  await renderBidderLinksTable();
+  if (depthEnabled) await renderDepthLayer(true);
 }
 
 function readDivisionCheckboxes(row) {
