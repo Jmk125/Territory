@@ -493,11 +493,13 @@
     .depth-cell-modal { display: flex; flex-direction: column; gap: 8px; }
     .depth-cell-row { border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; background: var(--surface2); }
     .depth-cell-row-head { display: flex; align-items: center; gap: 6px; font-size: 0.85rem; }
+    .depth-cell-expand { width: 1em; flex-shrink: 0; color: var(--text2); }
     .depth-cell-swatch { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
     .depth-cell-num { font-variant-numeric: tabular-nums; font-size: 0.8rem; color: var(--text2); white-space: nowrap; }
-    .depth-chip-row { display: flex; flex-wrap: wrap; gap: 4px 6px; margin-top: 6px; }
-    .depth-chip { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 2px 8px; font-size: 0.72rem; }
-    .depth-chip .hint { margin-left: 2px; }
+    .depth-contrib-list { display: flex; flex-direction: column; margin-top: 6px; border-top: 1px solid var(--border); padding-top: 6px; }
+    .depth-contrib-item { display: flex; justify-content: space-between; gap: 10px; padding: 3px 0 3px 22px; font-size: 0.78rem; }
+    .depth-contrib-item:not(:last-child) { border-bottom: 1px solid var(--border); }
+    #modal-body .btn-ghost.active { background: var(--accent); color: #fff; border-color: var(--accent); }
 
     /* ── BATCH IMPORT ── */
     .batch-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
@@ -2370,37 +2372,83 @@ function renderDepthLegend(divisions) {
 // A Leaflet popup bubble doesn't scroll and has nowhere to grow when every
 // division is checked, so this uses the app's regular modal (already
 // scrollable up to 90vh, closeable via button/backdrop/Escape) instead.
-function showDepthCellPopup(cellId, divisions) {
-  const composite = depthCompositeAt(cellId, divisions);
+// The bulk grid response caps each cell's contributor list short (kept the
+// whole-grid payload sane across thousands of cells), so a click fetches the
+// full, untruncated list for just this one cell from a dedicated endpoint.
+// State lives here (not re-fetched) so expanding a row or changing the sort
+// just re-renders instead of hitting the network again.
+let depthCellModalState = null;
+
+async function showDepthCellPopup(cellId, divisions) {
+  openModal('Coverage Depth', '<div class="hint">Loading…</div>');
+  const excludeParam = depthExcludedBidders.size ? `&excludeBidders=${[...depthExcludedBidders].map(encodeURIComponent).join(',')}` : '';
+  let detail = {};
+  try {
+    detail = await fetch(`/api/coverage-depth/cell/${encodeURIComponent(cellId)}?divisions=${divisions.map(encodeURIComponent).join(',')}${excludeParam}`).then(r => r.json());
+  } catch (e) { /* rows below just show "no data" if this failed */ }
+  depthCellModalState = { cellId, divisions, detail, expanded: new Set(), sort: 'division' };
+  renderDepthCellModal();
+}
+
+function renderDepthCellModal() {
+  const st = depthCellModalState;
+  if (!st) return;
+  const composite = depthCompositeAt(st.cellId, st.divisions);
   const ruleLabel = depthRule === 'average' ? 'average' : 'minimum — limiting division';
-  const rows = divisions.map(code => {
-    const d = depthData.divisions[code];
-    const cell = d && d.cells && d.cells[cellId];
-    const name = (coverageConfig.config.divisions[code] || {}).name || code;
-    if (!cell) {
+
+  const rowsData = st.divisions.map(code => ({
+    code, name: (coverageConfig.config.divisions[code] || {}).name || code,
+    cell: st.detail[code], target: depthTargets[code] || 1
+  }));
+  rowsData.sort(st.sort === 'count'
+    ? (a, b) => (((b.cell && b.cell.contributors) || []).length) - (((a.cell && a.cell.contributors) || []).length)
+    : (a, b) => a.code.localeCompare(b.code, undefined, { numeric: true }));
+
+  const rows = rowsData.map(({ code, name, cell, target }) => {
+    if (!cell || cell.alwaysCovered) {
       return `<div class="depth-cell-row">
-        <div class="depth-cell-row-head"><span class="depth-cell-swatch" style="background:#555"></span><b>${code} ${escapeHtml(name)}</b><span class="hint" style="margin-left:auto">no data</span></div>
+        <div class="depth-cell-row-head"><span class="depth-cell-swatch" style="background:#555"></span><b>${code} ${escapeHtml(name)}</b><span class="hint" style="margin-left:auto">${cell && cell.alwaysCovered ? 'always covered' : 'no data'}</span></div>
       </div>`;
     }
-    const target = depthTargets[code] || 1;
     const ratio = cell.depth / target;
-    const chips = (cell.contributors || []).length
-      ? cell.contributors.map(c => `<span class="depth-chip">${escapeHtml(c.name)} <span class="hint">${c.weight}</span></span>`).join('')
-      : '<span class="hint">no contributors</span>';
+    const contributors = cell.contributors || [];
+    const expanded = st.expanded.has(code);
+    const list = !expanded ? '' : contributors.length
+      ? `<div class="depth-contrib-list">${contributors.map(c => `<div class="depth-contrib-item"><span>${escapeHtml(c.name)}</span><span class="hint">${c.weight}</span></div>`).join('')}</div>`
+      : '<div class="hint" style="margin-top:6px">no contributors</div>';
     return `<div class="depth-cell-row">
-      <div class="depth-cell-row-head">
+      <div class="depth-cell-row-head" style="cursor:pointer" onclick="toggleDepthCellRow('${code}')">
+        <span class="depth-cell-expand">${expanded ? '▾' : '▸'}</span>
         <span class="depth-cell-swatch" style="background:${depthCellColor(ratio)}"></span>
         <b>${code} ${escapeHtml(name)}</b>
+        <span class="hint">${contributors.length} contractor${contributors.length !== 1 ? 's' : ''}</span>
         <span class="depth-cell-num" style="margin-left:auto">${cell.depth}${cell.secondaryDepth ? ` <span class="hint">(+${cell.secondaryDepth} support)</span>` : ''} / ${target}</span>
       </div>
-      <div class="depth-chip-row">${chips}</div>
+      ${list}
     </div>`;
   }).join('');
+
   openModal(
-    `Coverage Depth <span class="hint" style="font-weight:400;font-size:0.75rem;display:block;margin-top:2px">${divisions.length} division${divisions.length !== 1 ? 's' : ''} · composite ${Math.round(composite * 100) / 100} (${ruleLabel})</span>`,
-    `<div class="depth-cell-modal">${rows}</div>
+    `Coverage Depth <span class="hint" style="font-weight:400;font-size:0.75rem;display:block;margin-top:2px">${st.divisions.length} division${st.divisions.length !== 1 ? 's' : ''} · composite ${Math.round(composite * 100) / 100} (${ruleLabel})</span>`,
+    `<div class="row" style="gap:6px;margin-bottom:10px;align-items:center">
+       <span class="hint">Sort by</span>
+       <button class="btn btn-ghost btn-sm ${st.sort === 'division' ? 'active' : ''}" onclick="setDepthCellModalSort('division')">Division #</button>
+       <button class="btn btn-ghost btn-sm ${st.sort === 'count' ? 'active' : ''}" onclick="setDepthCellModalSort('count')">Contractor count</button>
+     </div>
+     <div class="depth-cell-modal">${rows}</div>
      <div class="row" style="margin-top:14px"><button class="btn btn-ghost" onclick="closeModal()">Close</button></div>`
   );
+}
+
+function toggleDepthCellRow(code) {
+  if (!depthCellModalState) return;
+  if (depthCellModalState.expanded.has(code)) depthCellModalState.expanded.delete(code); else depthCellModalState.expanded.add(code);
+  renderDepthCellModal();
+}
+function setDepthCellModalSort(sort) {
+  if (!depthCellModalState) return;
+  depthCellModalState.sort = sort;
+  renderDepthCellModal();
 }
 
 // Contour at the depth==target boundary — "a project inside this line can
