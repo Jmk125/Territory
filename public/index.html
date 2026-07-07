@@ -779,7 +779,7 @@
       <span class="hint">mi</span>
     </div>
     <div class="row" style="gap:8px; align-items:center; margin-top:8px">
-      <input type="checkbox" id="depth-enabled" onchange="toggleDepthLayer()">
+      <input type="checkbox" id="depth-enabled" autocomplete="off" onchange="toggleDepthLayer()">
       <label for="depth-enabled" style="cursor:pointer; font-size:0.8rem;">Show coverage-depth layer</label>
     </div>
     <div id="depth-legend" class="hint" style="margin-top:4px"></div>
@@ -1081,6 +1081,13 @@ async function boot() {
   if (booted) return;
   booted = true;
   initMap();
+  // Some browsers restore a checkbox's checked state across a reload on their
+  // own (independent of any app code), which left this box visibly checked
+  // while depthEnabled — the actual source of truth — was still false, so the
+  // layer silently didn't draw until the box was toggled off and back on.
+  // Force the DOM to match the JS default on every boot instead of trusting it.
+  const depthCb = document.getElementById('depth-enabled');
+  if (depthCb) depthCb.checked = depthEnabled;
   restoreCoveragePaneState();
   loadProjectPins();
   loadExcluded();
@@ -2463,20 +2470,29 @@ function locPropTokens(l, name) {
   const toks = raw.split(',').map(s => s.trim()).filter(s => s !== '');
   return toks.length ? [...new Set(toks)] : [''];
 }
-// Distinct real values seen for a property, sorted naturally.
+// Distinct real values seen for a property, sorted naturally, plus a
+// trailing '' entry (the "(no value)" bucket) if any location lacks this
+// field entirely — it's a real, independently toggleable row, not an
+// automatic side effect of filtering the other values (see isLocPropHidden).
 function propertyValues(name) {
   const vals = new Set();
-  locations.forEach(l => locPropTokens(l, name).forEach(t => { if (t !== '') vals.add(t); }));
-  return [...vals].sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }));
+  let hasNoValue = false;
+  locations.forEach(l => locPropTokens(l, name).forEach(t => { if (t === '') hasNoValue = true; else vals.add(t); }));
+  const sorted = [...vals].sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }));
+  if (hasNoValue) sorted.push('');
+  return sorted;
 }
+// Display label for a property-filter row — '' is the "(no value)" bucket.
+function propValueLabel(v) { return v === '' ? '(no value)' : escapeHtml(v); }
 // Whether a property has an active filter (at least one value hidden).
 function isPropFilterActive(name) {
   return !!(propFilters[name] && propFilters[name].length);
 }
 // A location is hidden by an active property filter unless it has at least one
-// value for that property that is currently shown. So while a field is being
-// filtered, locations with no value for it (or only hidden values) drop out —
-// but a "00, 000" location stays as long as either 00 or 000 is still shown.
+// value for that property that is currently shown — '' (no value) is just
+// another value here, toggled independently like "00" or "000" would be, so
+// a location that lacks the field only drops out if "(no value)" itself was
+// explicitly unchecked, never as a side effect of hiding some other value.
 // Multiple active properties AND together.
 function isLocPropHidden(l) {
   for (const name of Object.keys(propFilters)) {
@@ -2484,7 +2500,7 @@ function isLocPropHidden(l) {
     if (!hidden || !hidden.length) continue;
     const hiddenSet = new Set(hidden);
     const tokens = locPropTokens(l, name);
-    const hasShown = tokens.some(t => t !== '' && !hiddenSet.has(t));
+    const hasShown = tokens.some(t => !hiddenSet.has(t));
     if (!hasShown) return true;
   }
   return false;
@@ -2828,8 +2844,9 @@ function filterGroupsHtml() {
 }
 
 // Property (custom-field) filter section for the filter-groups window. Uncheck
-// a value to hide every location that has it (or lacks the field, via "(no
-// value)"). Handlers take name/value indices to sidestep quoting.
+// a value to hide every location that has it — "(no value)" is its own row,
+// toggled the same as any other value. Handlers take name/value indices to
+// sidestep quoting.
 function propFilterHtml() {
   const names = allPropertyNames();
   if (!names.length) return '';
@@ -2840,7 +2857,7 @@ function propFilterHtml() {
     const expanded = fgPropExpanded.has(name);
     const active = hidden.size > 0;
     const sub = expanded ? `<div class="fg-sub">${vals.map((v, j) =>
-      `<label class="fg-loc"><input type="checkbox" ${hidden.has(v) ? '' : 'checked'} onchange="fgTogglePropValue(${i}, ${j})"> ${escapeHtml(v)}</label>`).join('')}</div>` : '';
+      `<label class="fg-loc"><input type="checkbox" ${hidden.has(v) ? '' : 'checked'} onchange="fgTogglePropValue(${i}, ${j})"> ${propValueLabel(v)}</label>`).join('')}</div>` : '';
     return `<div class="fg-type">
       <div class="fg-type-row">
         <span class="fg-type-name" onclick="fgPropExpand(${i})">${escapeHtml(name)}${active ? ' <span class="hint" style="color:var(--accent)">●</span>' : ''}</span>
@@ -2851,7 +2868,7 @@ function propFilterHtml() {
     </div>`;
   }).join('');
   return `<div class="section-divider" style="margin-top:14px">Filter by custom field <span class="hint">(applies on close)</span></div>
-    <div class="batch-hint">Uncheck values to hide them. While a field is filtered, locations that have none of the shown values (including ones with no value for it) are hidden.</div>
+    <div class="batch-hint">Uncheck values to hide them — "(no value)" is its own row, so locations missing this field only hide if you uncheck that too.</div>
     <div class="fg-tree">${rows}</div>`;
 }
 
